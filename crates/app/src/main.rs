@@ -3,11 +3,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
-mod db;
 mod theme;
 
 use app::TermdbApp;
-use db::Backend;
+use termdb::db::Backend;
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {

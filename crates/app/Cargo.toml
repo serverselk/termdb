@@ -9,5 +9,10 @@ description = "Lightweight multi-engine database tool"
 directories = "6"
 eframe = "0.36"
 egui = "0.36"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql", "postgres"] }
 termdb-core = { path = "../core" }
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"

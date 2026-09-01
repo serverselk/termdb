@@ -1,0 +1,32 @@
+services:
+  pg-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: pgtest
+      POSTGRES_PASSWORD: pgtest
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./postgres/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgtest -d shop"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  mysql-test:
+    image: mysql:8
+    environment:
+      MYSQL_DATABASE: mysql_test
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./mysql/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    command: ["--mysql-native-password=ON"]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -proot"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
