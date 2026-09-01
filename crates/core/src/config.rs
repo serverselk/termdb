@@ -14,6 +14,8 @@ use crate::models::{ConnectionConfig, Engine};
 pub enum ConfigError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("filesystem: {0}")]
+    Io(#[from] std::io::Error),
     #[error("connection name '{name}' is already in use")]
     DuplicateName { name: String },
 }
@@ -80,8 +82,12 @@ impl ConfigStore {
         Ok(store)
     }
 
-    /// Open (creating if needed) the store at `path`.
+    /// Open (creating if needed) the store at `path`. Missing parent
+    /// directories are created, so a first run on a fresh machine works.
     pub fn open(path: &Path) -> Result<Self, ConfigError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let conn = Connection::open(path)?;
         Self::new(conn)
     }
@@ -305,5 +311,26 @@ mod tests {
             store.get_setting("theme").unwrap(),
             Some("matrix".to_owned())
         );
+    }
+
+    #[test]
+    fn open_creates_missing_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("nested")
+            .join("deeper")
+            .join("termdb.sqlite3");
+        assert!(!path.parent().unwrap().exists());
+
+        let store = ConfigStore::open(&path).unwrap();
+        let id = store
+            .insert_connection(&ConnectionConfig::test("shop", Engine::Postgres))
+            .unwrap();
+        drop(store);
+
+        assert!(path.exists());
+        let reopened = ConfigStore::open(&path).unwrap();
+        assert_eq!(reopened.get_connection(id).unwrap().unwrap().name, "shop");
     }
 }
