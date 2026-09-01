@@ -1527,20 +1527,31 @@ impl TermdbApp {
     }
 
     fn ui_log(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("Log");
-            if ui.small_button("Clear").clicked() {
-                self.log.clear();
-            }
-        });
-        egui::ScrollArea::vertical()
-            .max_height(LOG_HEIGHT)
-            .auto_shrink([false, false])
-            .stick_to_bottom(true)
+        // The log is a bordered, opaque terminal pane. It is painted last, so
+        // its fill covers any stray lines from widgets above; the top border
+        // separates it from the content (the separator is inside this frame).
+        let fill = ui.visuals().panel_fill;
+        let border = ui.visuals().window_stroke.color;
+        egui::Frame::default()
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, border))
+            .inner_margin(egui::Margin::symmetric(8, 4))
             .show(ui, |ui| {
-                for line in &self.log {
-                    ui.monospace(line);
-                }
+                ui.horizontal(|ui| {
+                    ui.heading("Log");
+                    if ui.small_button("Clear").clicked() {
+                        self.log.clear();
+                    }
+                });
+                egui::ScrollArea::vertical()
+                    .max_height(LOG_HEIGHT)
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for line in &self.log {
+                            ui.monospace(line);
+                        }
+                    });
             });
     }
 }
@@ -1792,7 +1803,7 @@ impl eframe::App for TermdbApp {
             } else {
                 self.ui_central(ui);
             }
-            ui.separator();
+            ui.add_space(4.0);
             self.ui_log(ui);
         });
 
