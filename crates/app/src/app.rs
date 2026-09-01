@@ -1229,7 +1229,11 @@ impl TermdbApp {
                         .and_then(|cells| cells.get(i))
                         .and_then(Clone::clone)
                         .unwrap_or_default(),
-                    _ => col.default.clone().unwrap_or_default(),
+                    _ => col
+                        .default
+                        .as_deref()
+                        .and_then(termdb::record::clean_default)
+                        .unwrap_or_default(),
                 };
                 if mode == RecordPanelMode::Add && auto_increment_col(col) {
                     String::new()
