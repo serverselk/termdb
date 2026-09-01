@@ -1,0 +1,2 @@
+# termdb
+Lightweight DB tool
