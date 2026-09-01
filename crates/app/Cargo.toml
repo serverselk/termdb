@@ -1,0 +1,13 @@
+[package]
+name = "termdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lightweight multi-engine database tool"
+
+[dependencies]
+directories = "6"
+eframe = "0.36"
+egui = "0.36"
+termdb-core = { path = "../core" }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
