@@ -189,6 +189,10 @@ enum RecordAction {
 
 type TableKey = (i64, String, String);
 
+/// Fixed height of the bottom log strip; the table viewport stays above it so
+/// its borders never cross into the log.
+const LOG_HEIGHT: f32 = 150.0;
+
 /// How far along backend startup / last round-trip we are.
 enum BackendStatus {
     Starting,
@@ -1085,9 +1089,11 @@ impl TermdbApp {
         let mut double_clicked: Option<usize> = None;
         let mut row_action: Option<(usize, RecordAction)> = None;
         let ctx = ui.ctx().clone();
+        let table_height = (ui.available_height() - LOG_HEIGHT - 30.0).max(120.0);
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
+            .max_scroll_height(table_height)
             .cell_layout(egui::Layout::left_to_right(egui::Align::LEFT))
             .column(TableColumn::auto());
         for _ in columns.iter().skip(1) {
@@ -1528,6 +1534,7 @@ impl TermdbApp {
             }
         });
         egui::ScrollArea::vertical()
+            .max_height(LOG_HEIGHT)
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
@@ -1560,9 +1567,11 @@ fn short(sql: &str) -> String {
 /// Read-only virtualized grid for ad-hoc query results (headers are plain
 /// strings; no row selection).
 fn ui_result_grid(ui: &mut egui::Ui, columns: &[String], rows: &[Vec<Option<String>>]) {
+    let table_height = (ui.available_height() - LOG_HEIGHT - 30.0).max(120.0);
     let mut table = TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
+        .max_scroll_height(table_height)
         .cell_layout(egui::Layout::left_to_right(egui::Align::LEFT))
         .column(TableColumn::auto());
     for _ in columns.iter().skip(1) {
