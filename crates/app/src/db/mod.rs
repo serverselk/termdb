@@ -96,6 +96,7 @@ impl Backend {
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .thread_name("termdb-worker")
+                    .enable_io()
                     .enable_time()
                     .build()
                     .expect("tokio runtime failed to start");
