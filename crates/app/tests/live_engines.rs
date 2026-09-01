@@ -58,7 +58,7 @@ fn mysql_config() -> (ConnectionConfig, String) {
 #[tokio::test]
 async fn postgres_connects_and_lists_databases_and_tables() {
     let (cfg, password) = pg_config();
-    let Ok(session) = LiveSession::connect(&cfg, &password).await else {
+    let Ok(mut session) = LiveSession::connect(&cfg, &password).await else {
         eprintln!("skipping: cannot reach pg-test container");
         return;
     };
@@ -90,7 +90,7 @@ async fn postgres_connects_and_lists_databases_and_tables() {
 #[tokio::test]
 async fn mysql_connects_and_lists_databases_and_tables() {
     let (cfg, password) = mysql_config();
-    let Ok(session) = LiveSession::connect(&cfg, &password).await else {
+    let Ok(mut session) = LiveSession::connect(&cfg, &password).await else {
         eprintln!("skipping: cannot reach mysql-test container");
         return;
     };
@@ -128,4 +128,84 @@ fn app_style_runtime_connects_to_postgres() {
     };
     assert!(!session.databases.is_empty());
     rt.block_on(async { session.disconnect().await });
+}
+
+#[tokio::test]
+async fn postgres_describes_and_paginates() {
+    let (cfg, password) = pg_config();
+    let mut session = match LiveSession::connect(&cfg, &password).await {
+        Ok(session) => session,
+        Err(_) => {
+            eprintln!("skipping: cannot reach pg-test container");
+            return;
+        }
+    };
+    let db = cfg.database.clone().expect("pg db set");
+
+    let columns = session.describe(&db, "customers").await.expect("describe");
+    assert!(!columns.is_empty());
+    let id = &columns[0];
+    assert_eq!(id.name, "id");
+    assert_eq!(id.key, "PRI");
+    assert!(!id.nullable);
+    assert!(columns.iter().any(|c| c.name == "notes" && c.nullable));
+    assert!(columns.iter().all(|c| !c.ty.is_empty()), "types reported");
+
+    let total = session.count(&db, "customers").await.expect("count");
+    assert!(total >= 25, "enough rows to paginate");
+
+    let page_a = session
+        .page(&db, "customers", &columns, 10, 0)
+        .await
+        .expect("page a");
+    let page_b = session
+        .page(&db, "customers", &columns, 10, 10)
+        .await
+        .expect("page b");
+    assert_eq!(page_a.len(), 10);
+    assert_eq!(page_b.len(), 10);
+    assert!(page_a.iter().all(|r| r.len() == columns.len()));
+    let id_a: i64 = page_a[0][0].as_deref().unwrap().parse().unwrap();
+    let id_b: i64 = page_b[0][0].as_deref().unwrap().parse().unwrap();
+    assert!(id_b > id_a, "offset page starts further along");
+    assert!(
+        page_a.iter().any(|r| r.iter().any(Option::is_none)),
+        "some NULL cells render as None"
+    );
+
+    session.disconnect().await;
+}
+
+#[tokio::test]
+async fn mysql_describes_and_paginates() {
+    let (cfg, password) = mysql_config();
+    let mut session = match LiveSession::connect(&cfg, &password).await {
+        Ok(session) => session,
+        Err(_) => {
+            eprintln!("skipping: cannot reach mysql-test container");
+            return;
+        }
+    };
+
+    let columns = session
+        .describe("mysql_test", "customers")
+        .await
+        .expect("describe");
+    assert_eq!(columns[0].name, "id");
+    assert_eq!(columns[0].key, "PRI");
+
+    let total = session
+        .count("mysql_test", "customers")
+        .await
+        .expect("count");
+    assert!(total >= 1);
+
+    let page = session
+        .page("mysql_test", "customers", &columns, 5, 0)
+        .await
+        .expect("page");
+    assert_eq!(page.len() as i64, total);
+    assert!(page[0][0].as_deref().is_some());
+
+    session.disconnect().await;
 }

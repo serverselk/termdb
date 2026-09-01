@@ -17,7 +17,7 @@ pub mod engine;
 
 use termdb_core::{ConfigStore, ConnectionConfig, SecretStore, Vault, VaultKind};
 
-use self::engine::{EngineError, LiveSession};
+use self::engine::{Column, EngineError, LiveSession};
 
 /// Requests travelling UI -> backend.
 #[derive(Debug)]
@@ -35,6 +35,22 @@ pub enum Request {
     Disconnect { conn_id: i64 },
     /// List tables inside a database of a live connection.
     ListTables { conn_id: i64, database: String },
+    /// Describe a table and load its first page in one go.
+    OpenTable {
+        conn_id: i64,
+        database: String,
+        table: String,
+        limit: i64,
+    },
+    /// Load a page of rows; `columns` come from the earlier `OpenTable`.
+    LoadPage {
+        conn_id: i64,
+        database: String,
+        table: String,
+        columns: Vec<Column>,
+        limit: i64,
+        offset: i64,
+    },
 }
 
 /// Events travelling backend -> UI.
@@ -74,6 +90,37 @@ pub enum Event {
     TablesFailed {
         conn_id: i64,
         database: String,
+        message: String,
+    },
+    /// A table was described and its first page + total count loaded.
+    TableOpened {
+        conn_id: i64,
+        database: String,
+        table: String,
+        columns: Vec<Column>,
+        total: i64,
+        rows: Vec<Vec<Option<String>>>,
+    },
+    /// Describe/first-page load failed.
+    TableOpenFailed {
+        conn_id: i64,
+        database: String,
+        table: String,
+        message: String,
+    },
+    /// A later page of rows was loaded.
+    PageLoaded {
+        conn_id: i64,
+        database: String,
+        table: String,
+        total: i64,
+        rows: Vec<Vec<Option<String>>>,
+    },
+    /// Page load failed.
+    PageFailed {
+        conn_id: i64,
+        database: String,
+        table: String,
         message: String,
     },
     /// Any persistence/backend error, surfaced as a log line.
@@ -255,7 +302,7 @@ async fn worker_loop(req_rx: mpsc::Receiver<Request>, ev_tx: mpsc::Sender<Event>
                     let _ = ev_tx.send(Event::Disconnected { conn_id, name });
                 }
             }
-            Request::ListTables { conn_id, database } => match sessions.get(&conn_id) {
+            Request::ListTables { conn_id, database } => match sessions.get_mut(&conn_id) {
                 Some(session) => match session.tables(&database).await {
                     Ok(tables) => {
                         let _ = ev_tx.send(Event::TablesListed {
@@ -280,6 +327,94 @@ async fn worker_loop(req_rx: mpsc::Receiver<Request>, ev_tx: mpsc::Sender<Event>
                     });
                 }
             },
+            Request::OpenTable {
+                conn_id,
+                database,
+                table,
+                limit,
+            } => {
+                let Some(session) = sessions.get_mut(&conn_id) else {
+                    let _ = ev_tx.send(Event::TableOpenFailed {
+                        conn_id,
+                        database,
+                        table,
+                        message: "not connected".into(),
+                    });
+                    continue;
+                };
+                let result = async {
+                    let columns = session.describe(&database, &table).await?;
+                    let total = session.count(&database, &table).await?;
+                    let rows = session.page(&database, &table, &columns, limit, 0).await?;
+                    Ok::<_, EngineError>((columns, total, rows))
+                }
+                .await;
+                match result {
+                    Ok((columns, total, rows)) => {
+                        let _ = ev_tx.send(Event::TableOpened {
+                            conn_id,
+                            database,
+                            table,
+                            columns,
+                            total,
+                            rows,
+                        });
+                    }
+                    Err(message) => {
+                        let _ = ev_tx.send(Event::TableOpenFailed {
+                            conn_id,
+                            database,
+                            table,
+                            message: format_engine_error(&message),
+                        });
+                    }
+                }
+            }
+            Request::LoadPage {
+                conn_id,
+                database,
+                table,
+                columns,
+                limit,
+                offset,
+            } => {
+                let Some(session) = sessions.get_mut(&conn_id) else {
+                    let _ = ev_tx.send(Event::PageFailed {
+                        conn_id,
+                        database,
+                        table,
+                        message: "not connected".into(),
+                    });
+                    continue;
+                };
+                let result = async {
+                    let total = session.count(&database, &table).await?;
+                    let rows = session
+                        .page(&database, &table, &columns, limit, offset)
+                        .await?;
+                    Ok::<_, EngineError>((total, rows))
+                }
+                .await;
+                match result {
+                    Ok((total, rows)) => {
+                        let _ = ev_tx.send(Event::PageLoaded {
+                            conn_id,
+                            database,
+                            table,
+                            total,
+                            rows,
+                        });
+                    }
+                    Err(message) => {
+                        let _ = ev_tx.send(Event::PageFailed {
+                            conn_id,
+                            database,
+                            table,
+                            message: format_engine_error(&message),
+                        });
+                    }
+                }
+            }
         }
     }
 }
