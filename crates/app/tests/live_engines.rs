@@ -107,3 +107,25 @@ async fn mysql_connects_and_lists_databases_and_tables() {
 
     session.disconnect().await;
 }
+
+/// Guards the app's own runtime construction: `Backend::spawn` builds a
+/// multi-thread runtime with only `enable_io`+`enable_time`, and sqlx needs
+/// the IO driver. This mirrors that builder exactly instead of borrowing
+/// `#[tokio::test]`'s (IO-enabled) runtime.
+#[test]
+fn app_style_runtime_connects_to_postgres() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("build app-style runtime");
+    let (cfg, password) = pg_config();
+
+    let session = rt.block_on(async { LiveSession::connect(&cfg, &password).await });
+    let Ok(session) = session else {
+        eprintln!("skipping: cannot reach pg-test container");
+        return;
+    };
+    assert!(!session.databases.is_empty());
+    rt.block_on(async { session.disconnect().await });
+}
