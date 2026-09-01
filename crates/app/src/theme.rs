@@ -20,8 +20,14 @@ const DANGER: Color32 = Color32::from_rgb(0xf4, 0x87, 0x71);
 
 pub fn apply(ctx: &egui::Context) {
     ctx.set_theme(egui::ThemePreference::Dark);
-    ctx.set_visuals_of(Theme::Dark, visuals());
-    ctx.set_style_of(Theme::Dark, style());
+    // Embed the visuals inside the style: `set_style_of` replaces the whole
+    // stored style object, so setting visuals separately first then the style
+    // would wipe them again.
+    let style = egui::Style {
+        visuals: visuals(),
+        ..style()
+    };
+    ctx.set_style_of(Theme::Dark, style);
 }
 
 fn visuals() -> Visuals {
@@ -93,5 +99,23 @@ fn style() -> egui::Style {
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tui_theme_is_flat() {
+        let v = visuals();
+        assert_eq!(v.widgets.noninteractive.corner_radius, CornerRadius::ZERO);
+        assert_eq!(v.widgets.inactive.corner_radius, CornerRadius::ZERO);
+        assert_eq!(v.widgets.hovered.corner_radius, CornerRadius::ZERO);
+        assert_eq!(v.widgets.active.corner_radius, CornerRadius::ZERO);
+        assert_eq!(v.window_corner_radius, CornerRadius::ZERO);
+        assert_eq!(v.menu_corner_radius, CornerRadius::ZERO);
+        assert_eq!(v.window_shadow, Shadow::NONE);
+        assert_eq!(v.popup_shadow, Shadow::NONE);
     }
 }
