@@ -1,2 +1,2 @@
 # termdb
-Lightweight DB tool
+Lightweight DB Management tool
