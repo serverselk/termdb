@@ -234,7 +234,13 @@ impl TermdbApp {
                 self.push_log(format!("connect \"{name}\" failed: {message}"));
             }
             Event::Disconnected { conn_id, name } => {
+                self.live.remove(&conn_id);
                 self.open_tables.retain(|(c, _, _), _| *c != conn_id);
+                if let Some((c, _, _)) = &self.table_selection {
+                    if *c == conn_id {
+                        self.table_selection = None;
+                    }
+                }
                 self.push_log(format!("disconnected \"{name}\""));
             }
             Event::TablesListed {
