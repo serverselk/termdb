@@ -168,6 +168,14 @@ async fn postgres_describes_and_paginates() {
     assert_eq!(page_a.len(), 10);
     assert_eq!(page_b.len(), 10);
     assert!(page_a.iter().all(|r| r.len() == columns.len()));
+    let ids: Vec<i64> = page_a
+        .iter()
+        .map(|r| r[0].as_deref().unwrap().parse().unwrap())
+        .collect();
+    assert!(
+        ids.windows(2).all(|w| w[0] < w[1]),
+        "rows come back in primary-key order (stable across updates)"
+    );
     let id_a: i64 = page_a[0][0].as_deref().unwrap().parse().unwrap();
     let id_b: i64 = page_b[0][0].as_deref().unwrap().parse().unwrap();
     assert!(id_b > id_a, "offset page starts further along");
@@ -295,6 +303,16 @@ async fn postgres_query_filter_and_row_mutations() {
         .expect("find probe");
     let probe_id = probe_rows[0][0].clone().expect("probe id");
 
+    // Record the probe's position in id order before updating it.
+    let (_, id_rows) = session
+        .query_results("SELECT id FROM customers ORDER BY id")
+        .await
+        .expect("id list");
+    let pos_before = id_rows
+        .iter()
+        .position(|r| r[0].as_deref() == Some(probe_id.as_str()))
+        .expect("probe present");
+
     // UPDATE city by primary key.
     let update_values: Vec<(String, Option<String>)> = columns
         .iter()
@@ -322,6 +340,18 @@ async fn postgres_query_filter_and_row_mutations() {
             .expect("re-read");
         assert_eq!(city_rows[0][0].as_deref(), Some("Braga"));
     }
+
+    // The updated row must keep its spot: the update rewrites the tuple at
+    // the end of the heap, but id-ordered queries must not move it.
+    let (_, id_rows) = session
+        .query_results("SELECT id FROM customers ORDER BY id")
+        .await
+        .expect("id list after update");
+    let pos_after = id_rows
+        .iter()
+        .position(|r| r[0].as_deref() == Some(probe_id.as_str()))
+        .expect("probe still present");
+    assert_eq!(pos_after, pos_before, "updated row keeps its position");
 
     // DELETE by primary key.
     session

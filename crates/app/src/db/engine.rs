@@ -276,14 +276,16 @@ impl LiveSession {
             .join(", ");
         let quoted_table = quote_ref(database, table, engine);
         let where_sql = where_clause(engine, columns, filter)?;
+        let order_sql = order_by_clause(engine, columns);
         let (limit_ph, offset_ph) = match (&pool, where_sql.is_some()) {
             (LivePool::Postgres(_), true) => ("$2", "$3"),
             (LivePool::Postgres(_), false) => ("$1", "$2"),
             (LivePool::Mysql(_), _) => ("?", "?"),
         };
         let sql = format!(
-            "SELECT {select} FROM {quoted_table}{where} LIMIT {limit_ph} OFFSET {offset_ph}",
-            where = where_sql.unwrap_or_default()
+            "SELECT {select} FROM {quoted_table}{where}{order} LIMIT {limit_ph} OFFSET {offset_ph}",
+            where = where_sql.unwrap_or_default(),
+            order = order_sql.unwrap_or_default(),
         );
         // Bind order matches placeholder order: filter value, then limit/offset.
         let mut binds: Vec<String> = Vec::new();
@@ -612,6 +614,32 @@ fn cast_text(column: &str, engine: Engine) -> String {
         Engine::Postgres => format!("\"{}\"::text", column.replace('"', "\"\"")),
         Engine::Mysql => format!("CAST(`{}` AS CHAR)", column.replace('`', "``")),
     }
+}
+
+/// `ORDER BY` the primary-key column(s) so pages are stable across row
+/// updates (Postgres otherwise returns rows in heap order, which shuffles
+/// updated rows to the end). Falls back to the first column when no PK.
+fn order_by_clause(engine: Engine, columns: &[Column]) -> Option<String> {
+    let mut keys: Vec<&str> = columns
+        .iter()
+        .filter(|c| c.key == "PRI")
+        .map(|c| c.name.as_str())
+        .collect();
+    if keys.is_empty() {
+        keys = columns
+            .first()
+            .map(|c| vec![c.name.as_str()])
+            .unwrap_or_default();
+    }
+    if keys.is_empty() {
+        return None;
+    }
+    let ordered = keys
+        .iter()
+        .map(|name| quote_table(name, engine))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(" ORDER BY {ordered}"))
 }
 
 /// True when the `WHERE "col"` fragment (with a bound parameter) is desired.
