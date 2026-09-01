@@ -1,10 +1,12 @@
 //! egui application shell: connection list + add form, live connection status,
-//! and the database browser sidebar (M2). The data grid lands in M3.
+//! database/table sidebar and paginated data grid (M3).
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use egui::RichText;
+use egui_extras::{Column as TableColumn, TableBuilder};
+use termdb::db::engine::Column;
 use termdb::db::{Backend, Event, Request};
 use termdb_core::{ConfigStore, ConnectionConfig, Engine, VaultKind};
 
@@ -32,6 +34,31 @@ impl LiveConnection {
         }
     }
 }
+
+/// An opened table: describe + cached current page.
+struct OpenTable {
+    columns: Vec<Column>,
+    rows: Vec<Vec<Option<String>>>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+    loading: bool,
+}
+
+impl OpenTable {
+    fn placeholder(page_size: i64) -> Self {
+        Self {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            total: 0,
+            page: 0,
+            page_size,
+            loading: true,
+        }
+    }
+}
+
+type TableKey = (i64, String, String);
 
 /// How far along backend startup / last round-trip we are.
 enum BackendStatus {
@@ -94,7 +121,9 @@ pub struct TermdbApp {
     selected_id: Option<i64>,
     live: HashMap<i64, LiveConnection>,
     /// The most recently clicked table: `(conn_id, database, table)`.
-    table_selection: Option<(i64, String, String)>,
+    table_selection: Option<TableKey>,
+    open_tables: HashMap<TableKey, OpenTable>,
+    page_size: i64,
     form: NewConnectionForm,
     saving: bool,
     backend_status: BackendStatus,
@@ -126,6 +155,8 @@ impl TermdbApp {
             selected_id: None,
             live: HashMap::new(),
             table_selection: None,
+            open_tables: HashMap::new(),
+            page_size: 50,
             form: NewConnectionForm::default(),
             saving: false,
             backend_status: BackendStatus::Starting,
@@ -202,7 +233,8 @@ impl TermdbApp {
                 self.live.remove(&conn_id);
                 self.push_log(format!("connect \"{name}\" failed: {message}"));
             }
-            Event::Disconnected { name, .. } => {
+            Event::Disconnected { conn_id, name } => {
+                self.open_tables.retain(|(c, _, _), _| *c != conn_id);
                 self.push_log(format!("disconnected \"{name}\""));
             }
             Event::TablesListed {
@@ -225,6 +257,63 @@ impl TermdbApp {
                     live.loading_tables.remove(&database);
                 }
                 self.push_log(format!("tables \"{database}\": {message}"));
+            }
+            Event::TableOpened {
+                conn_id,
+                database,
+                table,
+                columns,
+                total,
+                rows,
+            } => {
+                let key = (conn_id, database.clone(), table.clone());
+                if let Some(open) = self.open_tables.get_mut(&key) {
+                    open.columns = columns;
+                    open.rows = rows;
+                    open.total = total;
+                    open.page = 0;
+                    open.loading = false;
+                }
+                self.push_log(format!(
+                    "opened \"{database}.{table}\" — {} column(s), {total} row(s)",
+                    self.open_tables
+                        .get(&key)
+                        .map(|o| o.columns.len())
+                        .unwrap_or(0)
+                ));
+            }
+            Event::TableOpenFailed {
+                conn_id,
+                database,
+                table,
+                message,
+            } => {
+                self.open_tables.remove(&(conn_id, database, table));
+                self.push_log(format!("open table failed: {message}"));
+            }
+            Event::PageLoaded {
+                conn_id,
+                database,
+                table,
+                total,
+                rows,
+            } => {
+                if let Some(open) = self.open_tables.get_mut(&(conn_id, database, table)) {
+                    open.rows = rows;
+                    open.total = total;
+                    open.loading = false;
+                }
+            }
+            Event::PageFailed {
+                conn_id,
+                database,
+                table,
+                message,
+            } => {
+                if let Some(open) = self.open_tables.get_mut(&(conn_id, database, table)) {
+                    open.loading = false;
+                }
+                self.push_log(format!("page failed: {message}"));
             }
             Event::StoreFailed { message } => {
                 self.saving = false;
@@ -474,6 +563,14 @@ impl TermdbApp {
     }
 
     fn ui_central(&mut self, ui: &mut egui::Ui) {
+        if let Some(key) = self.table_selection.clone() {
+            self.ui_open_table(ui, key);
+        } else {
+            self.ui_connection_details(ui);
+        }
+    }
+
+    fn ui_connection_details(&mut self, ui: &mut egui::Ui) {
         ui.heading("Details");
         if let Some(id) = self.selected_id {
             if let Some(cfg) = self.connections.iter().find(|c| c.id == Some(id)) {
@@ -508,17 +605,6 @@ impl TermdbApp {
                             .color(egui::Color32::from_rgb(0x56, 0xd3, 0x64)),
                     );
                     ui.label(format!("{} database(s)", live.databases.len()));
-                    if let Some((conn_id, db, table)) = &self.table_selection {
-                        if *conn_id == id {
-                            ui.add_space(6.0);
-                            ui.label(format!("Selected: {db} › {table}"));
-                            ui.label(
-                                RichText::new("the data grid lands in the M3 milestone")
-                                    .weak()
-                                    .italics(),
-                            );
-                        }
-                    }
                 } else {
                     ui.label(
                         RichText::new("connect from the sidebar to browse databases and tables")
@@ -530,6 +616,181 @@ impl TermdbApp {
         } else {
             ui.label(RichText::new("select a connection, or add one").weak());
         }
+    }
+
+    /// Central panel for a selected table: toolbar + virtualized paginated grid.
+    fn ui_open_table(&mut self, ui: &mut egui::Ui, key: TableKey) {
+        let (conn_id, database, table) = key.clone();
+        if !self.live.contains_key(&conn_id) {
+            self.table_selection = None;
+            return;
+        }
+
+        // Lazy open: first time this table is shown, ask the backend.
+        if !self.open_tables.contains_key(&key) {
+            self.open_tables
+                .insert(key.clone(), OpenTable::placeholder(self.page_size));
+            self.backend.send(Request::OpenTable {
+                conn_id,
+                database: database.clone(),
+                table: table.clone(),
+                limit: self.page_size,
+            });
+            self.push_log(format!("opening \"{database}.{table}\"…"));
+        }
+
+        let loading = self
+            .open_tables
+            .get(&key)
+            .map(|o| o.loading)
+            .unwrap_or(false);
+        let loaded = self
+            .open_tables
+            .get(&key)
+            .map(|o| !o.columns.is_empty())
+            .unwrap_or(false);
+        let page = self.open_tables.get(&key).map(|o| o.page).unwrap_or(0);
+        let total = self.open_tables.get(&key).map(|o| o.total).unwrap_or(0);
+        let page_size = self
+            .open_tables
+            .get(&key)
+            .map(|o| o.page_size)
+            .unwrap_or(self.page_size);
+        let pages = total_pages(total, page_size);
+        let on_last = page + 1 >= pages;
+        let prev_size = self.page_size;
+
+        ui.horizontal(|ui| {
+            ui.heading(format!("{database} › {table}"));
+            ui.separator();
+
+            egui::ComboBox::from_id_salt("page_size")
+                .selected_text(format!("{} / page", self.page_size))
+                .show_ui(ui, |ui| {
+                    for size in [25i64, 50, 100, 200] {
+                        ui.selectable_value(&mut self.page_size, size, format!("{size} / page"));
+                    }
+                });
+
+            ui.separator();
+            let prev = ui.add_enabled(loaded && page > 0 && !loading, egui::Button::new("‹ Prev"));
+            if prev.clicked() {
+                self.goto_page(&key, page - 1);
+            }
+            if loaded {
+                ui.label(format!("page {} / {}", page + 1, pages));
+            }
+            let next = ui.add_enabled(loaded && !on_last && !loading, egui::Button::new("Next ›"));
+            if next.clicked() {
+                self.goto_page(&key, page + 1);
+            }
+            ui.label(format!("{total} rows"));
+            if loading {
+                ui.label(RichText::new("…").weak());
+            }
+        });
+
+        // Page-size change reloads from page 0.
+        if self.page_size != prev_size && loaded {
+            if let Some(open) = self.open_tables.get_mut(&key) {
+                open.page_size = self.page_size;
+            }
+            self.goto_page(&key, 0);
+        }
+
+        if !loaded {
+            ui.label(RichText::new("loading table…").weak());
+            return;
+        }
+
+        let columns = self
+            .open_tables
+            .get(&key)
+            .map(|o| o.columns.clone())
+            .unwrap_or_default();
+        let row_count = self
+            .open_tables
+            .get(&key)
+            .map(|o| o.rows.len())
+            .unwrap_or(0);
+
+        let mut table = TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::LEFT))
+            .column(TableColumn::auto());
+        for _ in columns.iter().skip(1) {
+            table = table.column(TableColumn::auto());
+        }
+        table
+            .header(38.0, |mut header| {
+                for col in &columns {
+                    header.col(|ui| {
+                        let title = if col.key == "PRI" {
+                            format!("{} (PK)", col.name)
+                        } else {
+                            col.name.clone()
+                        };
+                        let tooltip = format!(
+                            "Type: {}\nNull: {}\nKey: {}\nDefault: {}\nExtra: {}",
+                            col.ty,
+                            if col.nullable { "yes" } else { "no" },
+                            if col.key.is_empty() { "—" } else { &col.key },
+                            col.default.as_deref().unwrap_or("—"),
+                            if col.extra.is_empty() {
+                                "—"
+                            } else {
+                                &col.extra
+                            },
+                        );
+                        ui.vertical(|ui| {
+                            ui.strong(title);
+                            ui.label(RichText::new(&col.ty).small().weak());
+                        })
+                        .response
+                        .on_hover_text(tooltip);
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(22.0, row_count, |mut row| {
+                    let i = row.index();
+                    if let Some(open) = self.open_tables.get(&key) {
+                        if let Some(cells) = open.rows.get(i) {
+                            for cell in cells {
+                                row.col(|ui| match cell {
+                                    Some(value) => {
+                                        ui.label(RichText::new(value));
+                                    }
+                                    None => {
+                                        ui.label(RichText::new("NULL").weak().italics());
+                                    }
+                                });
+                            }
+                        }
+                    }
+                });
+            });
+    }
+
+    fn goto_page(&mut self, key: &TableKey, page: i64) {
+        let (conn_id, database, table) = key.clone();
+        let Some(open) = self.open_tables.get_mut(key) else {
+            return;
+        };
+        let columns = open.columns.clone();
+        let page_size = open.page_size;
+        let page = page.max(0);
+        open.page = page;
+        open.loading = true;
+        self.backend.send(Request::LoadPage {
+            conn_id,
+            database,
+            table,
+            columns,
+            limit: page_size,
+            offset: page * page_size,
+        });
     }
 
     fn ui_log(&mut self, ui: &mut egui::Ui) {
@@ -547,6 +808,14 @@ impl TermdbApp {
                     ui.monospace(line);
                 }
             });
+    }
+}
+
+fn total_pages(total: i64, page_size: i64) -> i64 {
+    if total <= 0 {
+        1
+    } else {
+        (total + page_size - 1) / page_size
     }
 }
 
