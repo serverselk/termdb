@@ -1532,7 +1532,7 @@ impl TermdbApp {
         // separates it from the content (the separator is inside this frame).
         let fill = ui.visuals().panel_fill;
         let border = ui.visuals().window_stroke.color;
-        egui::Frame::default()
+        let _ = egui::Frame::default()
             .fill(fill)
             .stroke(egui::Stroke::new(1.0, border))
             .inner_margin(egui::Margin::symmetric(8, 4))
