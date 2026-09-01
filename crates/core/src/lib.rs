@@ -7,6 +7,6 @@ pub mod config;
 pub mod models;
 pub mod vault;
 
-pub use config::{ConfigError, ConfigStore};
+pub use config::{ConfigError, ConfigStore, HistoryEntry};
 pub use models::{ConnectionConfig, Engine};
 pub use vault::{FileVault, KeyringVault, SecretStore, Vault, VaultError, VaultKind};
