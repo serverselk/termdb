@@ -1,0 +1,17 @@
+[package]
+name = "termdb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "termdb core: local config store, credential vault, shared models"
+
+[dependencies]
+directories = "6"
+keyring = "4"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
