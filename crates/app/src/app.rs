@@ -908,7 +908,7 @@ impl TermdbApp {
                 if let Some(live) = self.live.get(&id) {
                     ui.label(
                         RichText::new(format!("● connected — {}", live.server_version))
-                            .color(egui::Color32::from_rgb(0x56, 0xd3, 0x64)),
+                            .color(egui::Color32::from_rgb(0x7b, 0xc9, 0x6f)),
                     );
                     ui.label(format!("{} database(s)", live.databases.len()));
                 } else {
