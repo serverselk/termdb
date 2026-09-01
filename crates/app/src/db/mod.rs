@@ -4,16 +4,20 @@
 //! thread hosts a tokio multi-thread runtime; the UI and the runtime talk
 //! over two `std::sync::mpsc` channels which the UI drains every frame.
 //!
-//! M1 only ships a fake `Ping` round-trip and local-save plumbing to prove
-//! the shape. M2 will grow `Request::Connect`/`Query` variants that hand off
-//! to sqlx pools living on this same runtime.
+//! M1 shipped the shape with a fake `Ping` round-trip; M2 adds real live
+//! sqlx sessions for MySQL/Postgres on this same runtime.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub mod engine;
+
 use termdb_core::{ConfigStore, ConnectionConfig, SecretStore, Vault, VaultKind};
+
+use self::engine::{EngineError, LiveSession};
 
 /// Requests travelling UI -> backend.
 #[derive(Debug)]
@@ -25,6 +29,12 @@ pub enum Request {
         cfg: ConnectionConfig,
         password: String,
     },
+    /// Open a pool to a saved connection and discover databases.
+    Connect { conn_id: i64 },
+    /// Close the pool for a connection.
+    Disconnect { conn_id: i64 },
+    /// List tables inside a database of a live connection.
+    ListTables { conn_id: i64, database: String },
 }
 
 /// Events travelling backend -> UI.
@@ -39,26 +49,54 @@ pub enum Event {
     Pong { payload: String, latency_ms: u64 },
     /// Confirmation that a connection was saved.
     ConnectionSaved { cfg: ConnectionConfig },
+    /// A live session is up and its databases are listed.
+    Connected {
+        conn_id: i64,
+        cfg: ConnectionConfig,
+        server_version: String,
+        databases: Vec<String>,
+    },
+    /// Could not open a session.
+    ConnectFailed {
+        conn_id: i64,
+        name: String,
+        message: String,
+    },
+    /// Pool closed and removed.
+    Disconnected { conn_id: i64, name: String },
+    /// Tables for a database of a live session.
+    TablesListed {
+        conn_id: i64,
+        database: String,
+        tables: Vec<String>,
+    },
+    /// Table listing failed.
+    TablesFailed {
+        conn_id: i64,
+        database: String,
+        message: String,
+    },
     /// Any persistence/backend error, surfaced as a log line.
     StoreFailed { message: String },
 }
 
 /// Handle held by the UI to talk to the backend.
 pub struct Backend {
-    tx: Sender<Request>,
-    rx: Receiver<Event>,
+    tx: mpsc::Sender<Request>,
+    rx: mpsc::Receiver<Event>,
 }
 
 impl Backend {
     pub fn spawn() -> Self {
-        let (req_tx, req_rx) = channel();
-        let (ev_tx, ev_rx) = channel();
+        let (req_tx, req_rx) = mpsc::channel();
+        let (ev_tx, ev_rx) = mpsc::channel();
 
         thread::Builder::new()
             .name("termdb-backend".into())
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .thread_name("termdb-worker")
+                    .enable_io()
                     .enable_time()
                     .build()
                     .expect("tokio runtime failed to start");
@@ -82,19 +120,23 @@ impl Backend {
     }
 }
 
-async fn worker_loop(req_rx: Receiver<Request>, ev_tx: Sender<Event>) {
+async fn worker_loop(req_rx: mpsc::Receiver<Request>, ev_tx: mpsc::Sender<Event>) {
     // Creating the vault probes the OS keyring, which may touch D-Bus, so run
     // it off the async context.
     let config_dir = config_dir();
     let probe_dir = config_dir.clone();
-    let vault_kind = tokio::task::spawn_blocking(move || Vault::new(&probe_dir).kind())
-        .await
-        .unwrap_or(VaultKind::PlaintextFallback);
+    let vault = Arc::new(
+        tokio::task::spawn_blocking(move || Vault::new(&probe_dir))
+            .await
+            .unwrap_or_else(|_| Vault::plaintext(config_dir.join("vault-plaintext.json"))),
+    );
 
     let _ = ev_tx.send(Event::BackendReady {
         version: env!("CARGO_PKG_VERSION"),
-        vault_kind,
+        vault_kind: vault.kind(),
     });
+
+    let mut sessions: HashMap<i64, LiveSession> = HashMap::new();
 
     // `recv` blocks; `block_in_place` parks a runtime worker on it so the
     // async context stays free. The channel closes when the UI shuts down.
@@ -135,8 +177,115 @@ async fn worker_loop(req_rx: Receiver<Request>, ev_tx: Sender<Event>) {
                     }
                 }
             }
+            Request::Connect { conn_id } => {
+                let cfg = match ConfigStore::open(&ConfigStore::default_path())
+                    .and_then(|store| store.get_connection(conn_id))
+                {
+                    Ok(Some(cfg)) => cfg,
+                    Ok(None) => {
+                        let _ = ev_tx.send(Event::ConnectFailed {
+                            conn_id,
+                            name: format!("connection #{conn_id}"),
+                            message: "connection not found in config store".into(),
+                        });
+                        continue;
+                    }
+                    Err(e) => {
+                        let _ = ev_tx.send(Event::ConnectFailed {
+                            conn_id,
+                            name: format!("connection #{conn_id}"),
+                            message: e.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                let name = cfg.name.clone();
+                let vault = vault.clone();
+                let lookup_name = name.clone();
+                let password = tokio::task::spawn_blocking(move || vault.get(&lookup_name)).await;
+                match password {
+                    Ok(Ok(Some(password))) => match LiveSession::connect(&cfg, &password).await {
+                        Ok(session) => {
+                            let server_version = session.server_version.clone();
+                            let databases = session.databases.clone();
+                            let listed = cfg.clone();
+                            sessions.insert(conn_id, session);
+                            let _ = ev_tx.send(Event::Connected {
+                                conn_id,
+                                cfg: listed,
+                                server_version,
+                                databases,
+                            });
+                        }
+                        Err(message) => {
+                            let _ = ev_tx.send(Event::ConnectFailed {
+                                conn_id,
+                                name,
+                                message: format_engine_error(&message),
+                            });
+                        }
+                    },
+                    Ok(Ok(None)) => {
+                        let _ = ev_tx.send(Event::ConnectFailed {
+                            conn_id,
+                            name: name.clone(),
+                            message: format!("no password stored for \"{name}\" in the vault"),
+                        });
+                    }
+                    Ok(Err(e)) => {
+                        let _ = ev_tx.send(Event::ConnectFailed {
+                            conn_id,
+                            name,
+                            message: e.to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = ev_tx.send(Event::ConnectFailed {
+                            conn_id,
+                            name,
+                            message: format!("task join failed: {e}"),
+                        });
+                    }
+                }
+            }
+            Request::Disconnect { conn_id } => {
+                if let Some(session) = sessions.remove(&conn_id) {
+                    let name = session.cfg.name.clone();
+                    session.disconnect().await;
+                    let _ = ev_tx.send(Event::Disconnected { conn_id, name });
+                }
+            }
+            Request::ListTables { conn_id, database } => match sessions.get(&conn_id) {
+                Some(session) => match session.tables(&database).await {
+                    Ok(tables) => {
+                        let _ = ev_tx.send(Event::TablesListed {
+                            conn_id,
+                            database,
+                            tables,
+                        });
+                    }
+                    Err(message) => {
+                        let _ = ev_tx.send(Event::TablesFailed {
+                            conn_id,
+                            database,
+                            message: format_engine_error(&message),
+                        });
+                    }
+                },
+                None => {
+                    let _ = ev_tx.send(Event::TablesFailed {
+                        conn_id,
+                        database,
+                        message: "not connected".into(),
+                    });
+                }
+            },
         }
     }
+}
+
+fn format_engine_error(error: &EngineError) -> String {
+    error.to_string()
 }
 
 fn config_dir() -> PathBuf {

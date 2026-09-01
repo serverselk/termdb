@@ -1,12 +1,37 @@
-//! egui application shell for M1: connection list + add form, backend status,
-//! event log. The data grid and query editor land in later milestones.
+//! egui application shell: connection list + add form, live connection status,
+//! and the database browser sidebar (M2). The data grid lands in M3.
 
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use egui::RichText;
+use termdb::db::{Backend, Event, Request};
 use termdb_core::{ConfigStore, ConnectionConfig, Engine, VaultKind};
 
-use crate::db::{Backend, Event, Request};
+/// Live per-connection state, mirrored from the backend via events.
+struct LiveConnection {
+    connecting: bool,
+    server_version: String,
+    databases: Vec<String>,
+    tables: HashMap<String, Vec<String>>,
+    loading_tables: HashSet<String>,
+    selected_database: Option<String>,
+    selected_table: Option<String>,
+}
+
+impl LiveConnection {
+    fn placeholder() -> Self {
+        Self {
+            connecting: true,
+            server_version: String::new(),
+            databases: Vec::new(),
+            tables: HashMap::new(),
+            loading_tables: HashSet::new(),
+            selected_database: None,
+            selected_table: None,
+        }
+    }
+}
 
 /// How far along backend startup / last round-trip we are.
 enum BackendStatus {
@@ -67,6 +92,9 @@ pub struct TermdbApp {
     started: Instant,
     connections: Vec<ConnectionConfig>,
     selected_id: Option<i64>,
+    live: HashMap<i64, LiveConnection>,
+    /// The most recently clicked table: `(conn_id, database, table)`.
+    table_selection: Option<(i64, String, String)>,
     form: NewConnectionForm,
     saving: bool,
     backend_status: BackendStatus,
@@ -96,6 +124,8 @@ impl TermdbApp {
             started,
             connections,
             selected_id: None,
+            live: HashMap::new(),
+            table_selection: None,
             form: NewConnectionForm::default(),
             saving: false,
             backend_status: BackendStatus::Starting,
@@ -141,6 +171,60 @@ impl TermdbApp {
                 }
                 self.selected_id = cfg.id;
                 self.push_log(format!("saved connection \"{}\"", cfg.name));
+            }
+            Event::Connected {
+                conn_id,
+                cfg,
+                server_version,
+                databases,
+            } => {
+                let name = cfg.name.clone();
+                self.live.insert(
+                    conn_id,
+                    LiveConnection {
+                        connecting: false,
+                        server_version,
+                        databases,
+                        tables: HashMap::new(),
+                        loading_tables: HashSet::new(),
+                        selected_database: None,
+                        selected_table: None,
+                    },
+                );
+                self.selected_id = Some(conn_id);
+                self.push_log(format!("connected to \"{name}\""));
+            }
+            Event::ConnectFailed {
+                conn_id,
+                name,
+                message,
+            } => {
+                self.live.remove(&conn_id);
+                self.push_log(format!("connect \"{name}\" failed: {message}"));
+            }
+            Event::Disconnected { name, .. } => {
+                self.push_log(format!("disconnected \"{name}\""));
+            }
+            Event::TablesListed {
+                conn_id,
+                database,
+                tables,
+            } => {
+                if let Some(live) = self.live.get_mut(&conn_id) {
+                    live.loading_tables.remove(&database);
+                    live.tables.insert(database.clone(), tables.clone());
+                }
+                self.push_log(format!("\"{database}\": {} table(s)", tables.len()));
+            }
+            Event::TablesFailed {
+                conn_id,
+                database,
+                message,
+            } => {
+                if let Some(live) = self.live.get_mut(&conn_id) {
+                    live.loading_tables.remove(&database);
+                }
+                self.push_log(format!("tables \"{database}\": {message}"));
             }
             Event::StoreFailed { message } => {
                 self.saving = false;
@@ -191,7 +275,11 @@ impl TermdbApp {
                     vault_kind,
                     last_pong,
                 } => {
-                    let mut s = format!("backend: ready v{version} · {}", vault_kind.label());
+                    let live = self.live.len();
+                    let mut s = format!(
+                        "backend: ready v{version} · {} · {live} live",
+                        vault_kind.label()
+                    );
                     if let Some(pong) = last_pong {
                         s.push_str(&format!(
                             " · last ping \"{}\": {}ms",
@@ -221,11 +309,94 @@ impl TermdbApp {
         if self.connections.is_empty() {
             ui.label(RichText::new("no saved connections yet").weak());
         }
-        for cfg in &self.connections {
-            let selected = self.selected_id == cfg.id;
+
+        let connection_ids: Vec<i64> = self.connections.iter().filter_map(|c| c.id).collect();
+
+        for id in connection_ids {
+            let Some(cfg) = self.connections.iter().find(|c| c.id == Some(id)) else {
+                continue;
+            };
             let label = format!("{} · {}:{}", cfg.name, cfg.engine.label(), cfg.port);
-            if ui.selectable_label(selected, label).clicked() {
-                self.selected_id = cfg.id;
+
+            let mut connect = false;
+            let mut disconnect = false;
+            ui.horizontal(|ui| {
+                let selected = self.selected_id == Some(id);
+                if ui.selectable_label(selected, label).clicked() {
+                    self.selected_id = Some(id);
+                }
+                match self.live.get(&id) {
+                    Some(live) if live.connecting => {
+                        ui.label(RichText::new("connecting…").weak().small());
+                    }
+                    Some(_) => {
+                        if ui.small_button("Disconnect").clicked() {
+                            disconnect = true;
+                        }
+                    }
+                    None => {
+                        if ui.small_button("Connect").clicked() {
+                            connect = true;
+                        }
+                    }
+                }
+            });
+
+            if connect {
+                self.live.insert(id, LiveConnection::placeholder());
+                self.backend.send(Request::Connect { conn_id: id });
+            }
+            if disconnect {
+                self.backend.send(Request::Disconnect { conn_id: id });
+            }
+
+            self.ui_connection_tree(ui, id);
+        }
+    }
+
+    /// Databases (collapsing) → tables underneath a live connection.
+    fn ui_connection_tree(&mut self, ui: &mut egui::Ui, conn_id: i64) {
+        let Some(live) = self.live.get(&conn_id) else {
+            return;
+        };
+        if live.connecting || live.databases.is_empty() {
+            return;
+        }
+        let databases = live.databases.clone();
+
+        let live = self.live.get_mut(&conn_id).expect("connection still live");
+        for db in databases {
+            let tables = live.tables.get(&db).cloned();
+            let loading = live.loading_tables.contains(&db);
+
+            let resp = egui::CollapsingHeader::new(RichText::new(&db).strong())
+                .id_salt(("db", conn_id, &db))
+                .show(ui, |ui| {
+                    if let Some(ts) = &tables {
+                        for table in ts {
+                            let active = live.selected_database.as_deref() == Some(db.as_str())
+                                && live.selected_table.as_deref() == Some(table.as_str());
+                            if ui.selectable_label(active, table).clicked() {
+                                live.selected_database = Some(db.clone());
+                                live.selected_table = Some(table.clone());
+                                self.table_selection = Some((conn_id, db.clone(), table.clone()));
+                            }
+                        }
+                    } else if loading {
+                        ui.label("loading…");
+                    } else {
+                        ui.label(RichText::new("click to load tables").weak());
+                    }
+                });
+
+            let needs_load = tables.is_none() && !loading;
+            if resp.header_response.clicked() && needs_load {
+                live.loading_tables.insert(db.clone());
+                live.selected_database = Some(db.clone());
+                self.backend.send(Request::ListTables {
+                    conn_id,
+                    database: db,
+                });
             }
         }
     }
@@ -330,11 +501,31 @@ impl TermdbApp {
                         ui.end_row();
                     });
                 ui.add_space(8.0);
-                ui.label(
-                    RichText::new("connecting to a live engine arrives in the M2 milestone")
-                        .weak()
-                        .italics(),
-                );
+
+                if let Some(live) = self.live.get(&id) {
+                    ui.label(
+                        RichText::new(format!("● connected — {}", live.server_version))
+                            .color(egui::Color32::from_rgb(0x56, 0xd3, 0x64)),
+                    );
+                    ui.label(format!("{} database(s)", live.databases.len()));
+                    if let Some((conn_id, db, table)) = &self.table_selection {
+                        if *conn_id == id {
+                            ui.add_space(6.0);
+                            ui.label(format!("Selected: {db} › {table}"));
+                            ui.label(
+                                RichText::new("the data grid lands in the M3 milestone")
+                                    .weak()
+                                    .italics(),
+                            );
+                        }
+                    }
+                } else {
+                    ui.label(
+                        RichText::new("connect from the sidebar to browse databases and tables")
+                            .weak()
+                            .italics(),
+                    );
+                }
             }
         } else {
             ui.label(RichText::new("select a connection, or add one").weak());

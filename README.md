@@ -21,6 +21,15 @@ cargo clippy --workspace --all-targets
 cargo fmt --check
 ```
 
+## Development
+
+Local MySQL/Postgres test containers (used by `crates/app/tests/live_engines.rs`):
+
+```sh
+docker compose -f dev/compose.yaml up -d
+cargo test --workspace
+```
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
