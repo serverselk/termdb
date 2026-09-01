@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 
 pub mod engine;
 
-use termdb_core::{ConfigStore, ConnectionConfig, SecretStore, Vault, VaultKind};
+use termdb_core::{ConfigStore, ConnectionConfig, HistoryEntry, SecretStore, Vault, VaultKind};
 
-use self::engine::{Column, EngineError, LiveSession};
+use self::engine::{Column, EngineError, LiveSession, TableFilter};
 
 /// Requests travelling UI -> backend.
 #[derive(Debug)]
@@ -40,6 +40,7 @@ pub enum Request {
         conn_id: i64,
         database: String,
         table: String,
+        filter: Option<TableFilter>,
         limit: i64,
     },
     /// Load a page of rows; `columns` come from the earlier `OpenTable`.
@@ -48,8 +49,40 @@ pub enum Request {
         database: String,
         table: String,
         columns: Vec<Column>,
+        filter: Option<TableFilter>,
         limit: i64,
         offset: i64,
+    },
+    /// Run user-typed SQL against the connection's default pool.
+    RunQuery { conn_id: i64, sql: String },
+    /// Load recently run queries from disk.
+    LoadHistory {},
+    /// Forget all saved queries.
+    ClearHistory {},
+    /// Prepared UPDATE by primary key.
+    UpdateRow {
+        conn_id: i64,
+        database: String,
+        table: String,
+        columns: Vec<Column>,
+        values: Vec<(String, Option<String>)>,
+        pk: (String, Option<String>),
+    },
+    /// Prepared INSERT.
+    InsertRow {
+        conn_id: i64,
+        database: String,
+        table: String,
+        columns: Vec<Column>,
+        values: Vec<(String, Option<String>)>,
+    },
+    /// Prepared DELETE by primary key.
+    DeleteRow {
+        conn_id: i64,
+        database: String,
+        table: String,
+        columns: Vec<Column>,
+        pk: (String, Option<String>),
     },
 }
 
@@ -123,6 +156,26 @@ pub enum Event {
         table: String,
         message: String,
     },
+    /// Ad-hoc query finished; `columns` are the result-set column names.
+    QueryResults {
+        conn_id: i64,
+        columns: Vec<String>,
+        rows: Vec<Vec<Option<String>>>,
+    },
+    /// Ad-hoc query failed.
+    QueryFailed {
+        conn_id: i64,
+        sql: String,
+        message: String,
+    },
+    /// History loaded from disk.
+    HistoryListed { entries: Vec<HistoryEntry> },
+    /// History cleared.
+    HistoryCleared {},
+    /// A row mutation (update/delete/insert) succeeded.
+    RowChanged { conn_id: i64 },
+    /// A row mutation failed.
+    MutationFailed { message: String },
     /// Any persistence/backend error, surfaced as a log line.
     StoreFailed { message: String },
 }
@@ -331,6 +384,7 @@ async fn worker_loop(req_rx: mpsc::Receiver<Request>, ev_tx: mpsc::Sender<Event>
                 conn_id,
                 database,
                 table,
+                filter,
                 limit,
             } => {
                 let Some(session) = sessions.get_mut(&conn_id) else {
@@ -344,8 +398,12 @@ async fn worker_loop(req_rx: mpsc::Receiver<Request>, ev_tx: mpsc::Sender<Event>
                 };
                 let result = async {
                     let columns = session.describe(&database, &table).await?;
-                    let total = session.count(&database, &table).await?;
-                    let rows = session.page(&database, &table, &columns, limit, 0).await?;
+                    let total = session
+                        .count(&database, &table, &columns, filter.as_ref())
+                        .await?;
+                    let rows = session
+                        .page(&database, &table, &columns, filter.as_ref(), limit, 0)
+                        .await?;
                     Ok::<_, EngineError>((columns, total, rows))
                 }
                 .await;
@@ -375,6 +433,7 @@ async fn worker_loop(req_rx: mpsc::Receiver<Request>, ev_tx: mpsc::Sender<Event>
                 database,
                 table,
                 columns,
+                filter,
                 limit,
                 offset,
             } => {
@@ -388,9 +447,11 @@ async fn worker_loop(req_rx: mpsc::Receiver<Request>, ev_tx: mpsc::Sender<Event>
                     continue;
                 };
                 let result = async {
-                    let total = session.count(&database, &table).await?;
+                    let total = session
+                        .count(&database, &table, &columns, filter.as_ref())
+                        .await?;
                     let rows = session
-                        .page(&database, &table, &columns, limit, offset)
+                        .page(&database, &table, &columns, filter.as_ref(), limit, offset)
                         .await?;
                     Ok::<_, EngineError>((total, rows))
                 }
@@ -411,6 +472,160 @@ async fn worker_loop(req_rx: mpsc::Receiver<Request>, ev_tx: mpsc::Sender<Event>
                             database,
                             table,
                             message: format_engine_error(&message),
+                        });
+                    }
+                }
+            }
+            Request::RunQuery { conn_id, sql } => {
+                let session = sessions.get(&conn_id);
+                let outcome = match session {
+                    Some(session) => match session.query_results(&sql).await {
+                        Ok((columns, rows)) => Some((columns, rows)),
+                        Err(message) => {
+                            let _ = ev_tx.send(Event::QueryFailed {
+                                conn_id,
+                                sql: sql.clone(),
+                                message: format_engine_error(&message),
+                            });
+                            None
+                        }
+                    },
+                    None => {
+                        let _ = ev_tx.send(Event::QueryFailed {
+                            conn_id,
+                            sql: sql.clone(),
+                            message: "not connected".into(),
+                        });
+                        None
+                    }
+                };
+                if let Some((columns, rows)) = outcome {
+                    let _ = ev_tx.send(Event::QueryResults {
+                        conn_id,
+                        columns,
+                        rows,
+                    });
+                }
+                // Persist the query regardless of outcome so it can be retried.
+                let history = sql.clone();
+                tokio::task::spawn_blocking(move || {
+                    let store = ConfigStore::open(&ConfigStore::default_path());
+                    if let Ok(store) = store {
+                        let _ = store.insert_history(Some(conn_id), &history);
+                    }
+                });
+            }
+            Request::LoadHistory {} => {
+                let entries = tokio::task::spawn_blocking(move || {
+                    ConfigStore::open(&ConfigStore::default_path())
+                        .and_then(|store| store.list_history(50))
+                })
+                .await;
+                match entries {
+                    Ok(Ok(entries)) => {
+                        let _ = ev_tx.send(Event::HistoryListed { entries });
+                    }
+                    Ok(Err(message)) => {
+                        let _ = ev_tx.send(Event::StoreFailed {
+                            message: message.to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = ev_tx.send(Event::StoreFailed {
+                            message: format!("history join failed: {e}"),
+                        });
+                    }
+                }
+            }
+            Request::ClearHistory {} => {
+                let _ = tokio::task::spawn_blocking(move || {
+                    ConfigStore::open(&ConfigStore::default_path())
+                        .and_then(|store| store.clear_history())
+                })
+                .await;
+                let _ = ev_tx.send(Event::HistoryCleared {});
+            }
+            Request::UpdateRow {
+                conn_id,
+                database,
+                table,
+                columns,
+                values,
+                pk,
+            } => {
+                let outcome = sessions
+                    .get_mut(&conn_id)
+                    .map(|session| session.update_row(&database, &table, &columns, &values, &pk));
+                match outcome {
+                    Some(result) => match result.await {
+                        Ok(_) => {
+                            let _ = ev_tx.send(Event::RowChanged { conn_id });
+                        }
+                        Err(message) => {
+                            let _ = ev_tx.send(Event::MutationFailed {
+                                message: format_engine_error(&message),
+                            });
+                        }
+                    },
+                    None => {
+                        let _ = ev_tx.send(Event::MutationFailed {
+                            message: "not connected".into(),
+                        });
+                    }
+                }
+            }
+            Request::InsertRow {
+                conn_id,
+                database,
+                table,
+                columns,
+                values,
+            } => {
+                let outcome = sessions
+                    .get_mut(&conn_id)
+                    .map(|session| session.insert_row(&database, &table, &columns, &values));
+                match outcome {
+                    Some(result) => match result.await {
+                        Ok(_) => {
+                            let _ = ev_tx.send(Event::RowChanged { conn_id });
+                        }
+                        Err(message) => {
+                            let _ = ev_tx.send(Event::MutationFailed {
+                                message: format_engine_error(&message),
+                            });
+                        }
+                    },
+                    None => {
+                        let _ = ev_tx.send(Event::MutationFailed {
+                            message: "not connected".into(),
+                        });
+                    }
+                }
+            }
+            Request::DeleteRow {
+                conn_id,
+                database,
+                table,
+                columns,
+                pk,
+            } => {
+                let outcome = sessions
+                    .get_mut(&conn_id)
+                    .map(|session| session.delete_row(&database, &table, &columns, &pk));
+                match outcome {
+                    Some(result) => match result.await {
+                        Ok(_) => {
+                            let _ = ev_tx.send(Event::RowChanged { conn_id });
+                        }
+                        Err(message) => {
+                            let _ = ev_tx.send(Event::MutationFailed {
+                                message: format_engine_error(&message),
+                            });
+                        }
+                    },
+                    None => {
+                        let _ = ev_tx.send(Event::MutationFailed {
+                            message: "not connected".into(),
                         });
                     }
                 }

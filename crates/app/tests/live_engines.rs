@@ -12,7 +12,7 @@
 //! MySQL: `TERMDB_TEST_MYSQL_{HOST,PORT,USER,PASSWORD}` (defaults
 //! `localhost`, `3306`, `root`, `root`).
 
-use termdb::db::engine::LiveSession;
+use termdb::db::engine::{LiveSession, TableFilter};
 use termdb_core::{ConnectionConfig, Engine};
 
 fn env_or(key: &str, default: &str) -> String {
@@ -151,15 +151,18 @@ async fn postgres_describes_and_paginates() {
     assert!(columns.iter().any(|c| c.name == "notes" && c.nullable));
     assert!(columns.iter().all(|c| !c.ty.is_empty()), "types reported");
 
-    let total = session.count(&db, "customers").await.expect("count");
+    let total = session
+        .count(&db, "customers", &columns, None)
+        .await
+        .expect("count");
     assert!(total >= 25, "enough rows to paginate");
 
     let page_a = session
-        .page(&db, "customers", &columns, 10, 0)
+        .page(&db, "customers", &columns, None, 10, 0)
         .await
         .expect("page a");
     let page_b = session
-        .page(&db, "customers", &columns, 10, 10)
+        .page(&db, "customers", &columns, None, 10, 10)
         .await
         .expect("page b");
     assert_eq!(page_a.len(), 10);
@@ -195,17 +198,149 @@ async fn mysql_describes_and_paginates() {
     assert_eq!(columns[0].key, "PRI");
 
     let total = session
-        .count("mysql_test", "customers")
+        .count("mysql_test", "customers", &columns, None)
         .await
         .expect("count");
     assert!(total >= 1);
 
     let page = session
-        .page("mysql_test", "customers", &columns, 5, 0)
+        .page("mysql_test", "customers", &columns, None, 5, 0)
         .await
         .expect("page");
     assert_eq!(page.len() as i64, total);
     assert!(page[0][0].as_deref().is_some());
+
+    session.disconnect().await;
+}
+
+#[tokio::test]
+async fn postgres_query_filter_and_row_mutations() {
+    let (cfg, password) = pg_config();
+    let mut session = match LiveSession::connect(&cfg, &password).await {
+        Ok(session) => session,
+        Err(_) => {
+            eprintln!("skipping: cannot reach pg-test container");
+            return;
+        }
+    };
+    let db = cfg.database.clone().expect("pg db set");
+    let columns = session.describe(&db, "customers").await.expect("describe");
+    let rows_before = session
+        .count(&db, "customers", &columns, None)
+        .await
+        .unwrap();
+
+    // Ad-hoc query on the default pool.
+    let sql = "SELECT id, name FROM customers WHERE id <= 3 ORDER BY id";
+    let (cols, rows) = session.query_results(sql).await.expect("run query");
+    assert_eq!(cols, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(rows.len(), 3);
+
+    // WHERE builder filter equality (is_active = true).
+    let filter = TableFilter {
+        column: "is_active".into(),
+        op: "=".into(),
+        value: "true".into(),
+    };
+    let filtered_total = session
+        .count(&db, "customers", &columns, Some(&filter))
+        .await
+        .expect("filtered count");
+    assert!(filtered_total > 0 && filtered_total <= rows_before);
+    let filtered_page = session
+        .page(&db, "customers", &columns, Some(&filter), 10, 0)
+        .await
+        .expect("filtered page");
+    assert!(!filtered_page.is_empty());
+    let is_active_idx = columns.iter().position(|c| c.name == "is_active").unwrap();
+    assert!(
+        filtered_page
+            .iter()
+            .all(|r| r[is_active_idx].as_deref() == Some("true")),
+        "filtered rows all is_active"
+    );
+
+    // Insert a row, find it, update it, delete it.
+    let probe = format!(
+        "m4test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+    let insert_values: Vec<(String, Option<String>)> = columns
+        .iter()
+        .map(|c| match c.name.as_str() {
+            "name" => (c.name.clone(), Some(probe.clone())),
+            "email" => (c.name.clone(), Some(format!("{probe}@example.com"))),
+            _ => (c.name.clone(), None),
+        })
+        .collect();
+    session
+        .insert_row(&db, "customers", &columns, &insert_values)
+        .await
+        .expect("insert");
+    assert_eq!(
+        session
+            .count(&db, "customers", &columns, None)
+            .await
+            .unwrap(),
+        rows_before + 1,
+        "row inserted"
+    );
+
+    let (_, probe_rows) = session
+        .query_results(&format!("SELECT id FROM customers WHERE name = '{probe}'"))
+        .await
+        .expect("find probe");
+    let probe_id = probe_rows[0][0].clone().expect("probe id");
+
+    // UPDATE city by primary key.
+    let update_values: Vec<(String, Option<String>)> = columns
+        .iter()
+        .map(|c| match c.name.as_str() {
+            "name" => (c.name.clone(), Some(probe.clone())),
+            "email" => (c.name.clone(), Some(format!("{probe}@example.com"))),
+            "city" => (c.name.clone(), Some("Braga".into())),
+            _ => (c.name.clone(), None),
+        })
+        .collect();
+    session
+        .update_row(
+            &db,
+            "customers",
+            &columns,
+            &update_values,
+            &("id".to_owned(), Some(probe_id.clone())),
+        )
+        .await
+        .expect("update");
+    {
+        let (_, city_rows) = session
+            .query_results(&format!("SELECT city FROM customers WHERE id = {probe_id}"))
+            .await
+            .expect("re-read");
+        assert_eq!(city_rows[0][0].as_deref(), Some("Braga"));
+    }
+
+    // DELETE by primary key.
+    session
+        .delete_row(
+            &db,
+            "customers",
+            &columns,
+            &("id".to_owned(), Some(probe_id)),
+        )
+        .await
+        .expect("delete");
+    assert_eq!(
+        session
+            .count(&db, "customers", &columns, None)
+            .await
+            .unwrap(),
+        rows_before,
+        "row deleted"
+    );
 
     session.disconnect().await;
 }

@@ -124,6 +124,12 @@ impl ConfigStore {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS history (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                connection_id INTEGER,
+                sql           TEXT NOT NULL,
+                created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
             "#,
         )?;
         Ok(())
@@ -257,6 +263,52 @@ impl ConfigStore {
         )?;
         Ok(())
     }
+
+    /// Remember a query someone ran (history, query-field of the Electron app's
+    /// successor). `connection_id` is the optional originating connection.
+    pub fn insert_history(
+        &self,
+        connection_id: Option<i64>,
+        sql: &str,
+    ) -> Result<i64, ConfigError> {
+        self.conn.execute(
+            "INSERT INTO history (connection_id, sql) VALUES (?1, ?2)",
+            params![connection_id, sql],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Most recent queries, newest first.
+    pub fn list_history(&self, limit: usize) -> Result<Vec<HistoryEntry>, ConfigError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, connection_id, sql, created_at FROM history
+             ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |row| {
+            Ok(HistoryEntry {
+                id: row.get(0)?,
+                connection_id: row.get(1)?,
+                sql: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Forget all saved queries.
+    pub fn clear_history(&self) -> Result<(), ConfigError> {
+        self.conn.execute("DELETE FROM history", [])?;
+        Ok(())
+    }
+}
+
+/// A previously run query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub id: i64,
+    pub connection_id: Option<i64>,
+    pub sql: String,
+    pub created_at: String,
 }
 
 #[cfg(test)]
@@ -311,6 +363,38 @@ mod tests {
             store.get_setting("theme").unwrap(),
             Some("matrix".to_owned())
         );
+    }
+
+    #[test]
+    fn history_round_trip() {
+        let store = ConfigStore::in_memory().unwrap();
+        store
+            .insert_history(Some(1), "SELECT * FROM customers;")
+            .unwrap();
+        store.insert_history(None, "SELECT 1;").unwrap();
+
+        let entries = store.list_history(10).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].sql, "SELECT 1;");
+        assert_eq!(entries[0].connection_id, None);
+        assert_eq!(entries[1].sql, "SELECT * FROM customers;");
+        assert_eq!(entries[1].connection_id, Some(1));
+        assert!(!entries[0].created_at.is_empty());
+
+        store.clear_history().unwrap();
+        assert!(store.list_history(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn history_limit() {
+        let store = ConfigStore::in_memory().unwrap();
+        for i in 0..5 {
+            store.insert_history(None, &format!("SELECT {i};")).unwrap();
+        }
+        let entries = store.list_history(3).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].sql, "SELECT 4;");
+        assert_eq!(entries[2].sql, "SELECT 2;");
     }
 
     #[test]

@@ -10,6 +10,8 @@ directories = "6"
 eframe = "0.36"
 egui = "0.36"
 egui_extras = "0.36"
+rfd = "0.15"
+serde_json.workspace = true
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql", "postgres"] }
 termdb-core = { path = "../core" }
 thiserror.workspace = true

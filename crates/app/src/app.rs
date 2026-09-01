@@ -1,14 +1,15 @@
-//! egui application shell: connection list + add form, live connection status,
-//! database/table sidebar and paginated data grid (M3).
+//! egui application shell: connections, database/table sidebar, virtualized
+//! grid, query editor with history, and row editing (M4).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use egui::RichText;
+use egui::{text::Galley, FontId, RichText, TextBuffer};
 use egui_extras::{Column as TableColumn, TableBuilder};
-use termdb::db::engine::Column;
+use termdb::db::engine::{Column, TableFilter, FILTER_OPS};
 use termdb::db::{Backend, Event, Request};
-use termdb_core::{ConfigStore, ConnectionConfig, Engine, VaultKind};
+use termdb_core::{ConfigStore, ConnectionConfig, Engine, HistoryEntry, VaultKind};
 
 /// Live per-connection state, mirrored from the backend via events.
 struct LiveConnection {
@@ -35,7 +36,13 @@ impl LiveConnection {
     }
 }
 
-/// An opened table: describe + cached current page.
+/// One editable cell in the row-edit form.
+struct EditField {
+    text: String,
+    is_null: bool,
+}
+
+/// An opened table: describe + cached current page + editing/filter state.
 struct OpenTable {
     columns: Vec<Column>,
     rows: Vec<Vec<Option<String>>>,
@@ -43,6 +50,11 @@ struct OpenTable {
     page: i64,
     page_size: i64,
     loading: bool,
+    filter: Option<TableFilter>,
+    selected_row: Option<usize>,
+    selected_pk: Option<(String, Option<String>)>,
+    edit: Vec<EditField>,
+    is_new: bool,
 }
 
 impl OpenTable {
@@ -54,11 +66,50 @@ impl OpenTable {
             page: 0,
             page_size,
             loading: true,
+            filter: None,
+            selected_row: None,
+            selected_pk: None,
+            edit: Vec::new(),
+            is_new: false,
         }
     }
 }
 
+/// Single-column primary key usable for row editing.
+fn single_pk(columns: &[Column]) -> Option<&str> {
+    let keys: Vec<&str> = columns
+        .iter()
+        .filter(|c| c.key == "PRI")
+        .map(|c| c.name.as_str())
+        .collect();
+    if keys.len() == 1 {
+        Some(keys[0])
+    } else {
+        None
+    }
+}
+
+/// Result set of an ad-hoc query.
+struct QueryState {
+    conn_id: i64,
+    columns: Vec<String>,
+    rows: Vec<Vec<Option<String>>>,
+}
+
+/// Which view owns the central panel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Table,
+    Query,
+}
+
 type TableKey = (i64, String, String);
+
+enum RowAction {
+    Save,
+    Delete,
+    New,
+}
 
 /// How far along backend startup / last round-trip we are.
 enum BackendStatus {
@@ -124,6 +175,17 @@ pub struct TermdbApp {
     table_selection: Option<TableKey>,
     open_tables: HashMap<TableKey, OpenTable>,
     page_size: i64,
+    view: View,
+    /// Query editor buffer.
+    query_text: String,
+    /// Result of the last ad-hoc query, if any.
+    query_state: Option<QueryState>,
+    /// Previous runs, newest first.
+    history: Vec<HistoryEntry>,
+    /// WHERE-builder state (filter row).
+    filter_col: String,
+    filter_op: String,
+    filter_val: String,
     form: NewConnectionForm,
     saving: bool,
     backend_status: BackendStatus,
@@ -157,6 +219,13 @@ impl TermdbApp {
             table_selection: None,
             open_tables: HashMap::new(),
             page_size: 50,
+            view: View::Table,
+            query_text: String::new(),
+            query_state: None,
+            history: Vec::new(),
+            filter_col: String::new(),
+            filter_op: "=".to_owned(),
+            filter_val: String::new(),
             form: NewConnectionForm::default(),
             saving: false,
             backend_status: BackendStatus::Starting,
@@ -175,6 +244,7 @@ impl TermdbApp {
                     vault_kind,
                     last_pong: None,
                 };
+                self.backend.send(Request::LoadHistory {});
                 self.push_log(format!(
                     "backend ready v{version} · vault: {}",
                     vault_kind.label()
@@ -239,6 +309,12 @@ impl TermdbApp {
                 if let Some((c, _, _)) = &self.table_selection {
                     if *c == conn_id {
                         self.table_selection = None;
+                    }
+                }
+                if let Some(query) = &self.query_state {
+                    if query.conn_id == conn_id {
+                        self.query_state = None;
+                        self.view = View::Table;
                     }
                 }
                 self.push_log(format!("disconnected \"{name}\""));
@@ -320,6 +396,58 @@ impl TermdbApp {
                     open.loading = false;
                 }
                 self.push_log(format!("page failed: {message}"));
+            }
+            Event::QueryResults {
+                conn_id,
+                columns,
+                rows,
+            } => {
+                self.view = View::Query;
+                let n = rows.len();
+                self.query_state = Some(QueryState {
+                    conn_id,
+                    columns,
+                    rows: rows.clone(),
+                });
+                let name = self
+                    .connections
+                    .iter()
+                    .find(|c| c.id == Some(conn_id))
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| format!("#{conn_id}"));
+                self.push_log(format!("query on \"{name}\": {n} row(s)"));
+            }
+            Event::QueryFailed { sql, message, .. } => {
+                self.push_log(format!(
+                    "query \"{}\" failed: {message}",
+                    short(sql.as_str())
+                ));
+            }
+            Event::HistoryListed { entries } => {
+                self.history = entries;
+            }
+            Event::HistoryCleared {} => {
+                self.history.clear();
+                self.push_log("history cleared".into());
+            }
+            Event::RowChanged { conn_id } => {
+                // Reload whatever table the connection is showing.
+                if let Some((c, _, _)) = &self.table_selection {
+                    if *c == conn_id {
+                        let key = self.table_selection.clone().unwrap();
+                        let page = self.open_tables.get(&key).map(|o| o.page).unwrap_or(0);
+                        if let Some(open) = self.open_tables.get_mut(&key) {
+                            open.selected_row = None;
+                            open.edit.clear();
+                            open.is_new = false;
+                        }
+                        self.goto_page(&key, page);
+                    }
+                }
+                self.push_log("row changed".into());
+            }
+            Event::MutationFailed { message } => {
+                self.push_log(format!("edit failed: {message}"));
             }
             Event::StoreFailed { message } => {
                 self.saving = false;
@@ -475,6 +603,7 @@ impl TermdbApp {
                                 live.selected_database = Some(db.clone());
                                 live.selected_table = Some(table.clone());
                                 self.table_selection = Some((conn_id, db.clone(), table.clone()));
+                                self.view = View::Table;
                             }
                         }
                     } else if loading {
@@ -576,6 +705,83 @@ impl TermdbApp {
         }
     }
 
+    /// Query editor + results workspace. Lives in the central panel when the
+    /// last action was running a query (clicking a table returns to it).
+    fn ui_query_workspace(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("SQL");
+            ui.separator();
+            let live = self.selected_id.map(|id| self.live.contains_key(&id));
+            if ui
+                .add_enabled(
+                    live == Some(true) && !self.query_text.trim().is_empty(),
+                    egui::Button::new("Run ▸"),
+                )
+                .clicked()
+            {
+                self.run_query();
+            }
+            if let Some(state) = &self.query_state {
+                ui.label(format!(
+                    "{} column(s) · {} row(s)",
+                    state.columns.len(),
+                    state.rows.len()
+                ));
+                ui.separator();
+                if ui.small_button("Export CSV").clicked() {
+                    self.export_snapshot("csv");
+                }
+                if ui.small_button("Export JSON").clicked() {
+                    self.export_snapshot("json");
+                }
+            }
+        });
+
+        ui.add(
+            egui::TextEdit::multiline(&mut self.query_text)
+                .code_editor()
+                .hint_text("SELECT * FROM customers;\n-- run with the button above")
+                .desired_rows(5)
+                .layouter(&mut sql_layouter),
+        );
+
+        ui.separator();
+        if let Some(state) = &self.query_state {
+            let columns: Vec<String> = state.columns.clone();
+            let rows = &state.rows;
+            ui_result_grid(ui, &columns, rows);
+        } else if self.query_text.trim().is_empty() {
+            ui.label(RichText::new("pick a connected server and run a query").weak());
+        } else {
+            ui.label(RichText::new("ready — press Run ▸").weak());
+        }
+    }
+
+    fn export_snapshot(&mut self, format: &str) {
+        if let Some(state) = self.query_state.as_ref() {
+            let columns = state.columns.clone();
+            let rows = state.rows.clone();
+            self.export(&columns, &rows, format);
+        }
+    }
+
+    fn run_query(&mut self) {
+        let sql = self.query_text.trim().to_owned();
+        if sql.is_empty() {
+            return;
+        }
+        let Some(conn_id) = self.selected_id else {
+            self.push_log("select a connection first".into());
+            return;
+        };
+        if !self.live.contains_key(&conn_id) {
+            self.push_log(format!("connection #{conn_id} is not connected"));
+            return;
+        }
+        self.push_log(format!("running: {}", short(&sql)));
+        self.backend.send(Request::RunQuery { conn_id, sql });
+    }
+
     fn ui_connection_details(&mut self, ui: &mut egui::Ui) {
         ui.heading("Details");
         if let Some(id) = self.selected_id {
@@ -624,7 +830,7 @@ impl TermdbApp {
         }
     }
 
-    /// Central panel for a selected table: toolbar + virtualized paginated grid.
+    /// Central panel for a selected table: toolbar + filter + grid + row editor.
     fn ui_open_table(&mut self, ui: &mut egui::Ui, key: TableKey) {
         let (conn_id, database, table) = key.clone();
         if !self.live.contains_key(&conn_id) {
@@ -640,6 +846,7 @@ impl TermdbApp {
                 conn_id,
                 database: database.clone(),
                 table: table.clone(),
+                filter: None,
                 limit: self.page_size,
             });
             self.push_log(format!("opening \"{database}.{table}\"…"));
@@ -719,7 +926,62 @@ impl TermdbApp {
             .get(&key)
             .map(|o| o.rows.len())
             .unwrap_or(0);
+        let active_filter = self.open_tables.get(&key).and_then(|o| o.filter.clone());
 
+        // WHERE-builder row.
+        let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+        if !col_names.is_empty() && !col_names.contains(&self.filter_col) {
+            self.filter_col = col_names[0].clone();
+        }
+        ui.horizontal(|ui| {
+            ui.label("Filter:");
+            egui::ComboBox::from_id_salt("filter_col")
+                .width(120.0)
+                .selected_text(self.filter_col.clone())
+                .show_ui(ui, |ui| {
+                    for c in &col_names {
+                        ui.selectable_value(&mut self.filter_col, c.clone(), c);
+                    }
+                });
+            egui::ComboBox::from_id_salt("filter_op")
+                .selected_text(self.filter_op.clone())
+                .show_ui(ui, |ui| {
+                    for op in FILTER_OPS {
+                        let value = (*op).to_owned();
+                        ui.selectable_value(&mut self.filter_op, value.clone(), value);
+                    }
+                });
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter_val)
+                    .hint_text("value")
+                    .desired_width(160.0),
+            );
+            if ui
+                .add_enabled(!self.filter_val.is_empty(), egui::Button::new("Apply"))
+                .clicked()
+            {
+                let filter = TableFilter {
+                    column: self.filter_col.clone(),
+                    op: self.filter_op.clone(),
+                    value: self.filter_val.clone(),
+                };
+                self.set_filter(&key, Some(filter));
+            }
+            if active_filter.is_some() && ui.small_button("Clear").clicked() {
+                self.set_filter(&key, None);
+            }
+            if let Some(f) = &active_filter {
+                ui.label(
+                    RichText::new(format!("{} {op} \"{}\"", f.column, f.value, op = f.op))
+                        .weak()
+                        .italics(),
+                );
+            }
+        });
+
+        // Grid with row selection.
+        let mut clicked: Option<usize> = None;
+        let ctx = ui.ctx().clone();
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
@@ -761,6 +1023,12 @@ impl TermdbApp {
             .body(|body| {
                 body.rows(22.0, row_count, |mut row| {
                     let i = row.index();
+                    let selected = self
+                        .open_tables
+                        .get(&key)
+                        .map(|o| o.selected_row == Some(i))
+                        .unwrap_or(false);
+                    row.set_selected(selected);
                     if let Some(open) = self.open_tables.get(&key) {
                         if let Some(cells) = open.rows.get(i) {
                             for cell in cells {
@@ -775,8 +1043,249 @@ impl TermdbApp {
                             }
                         }
                     }
+                    if row.response().hovered() && ctx.input(|i| i.pointer.any_click()) {
+                        clicked = Some(i);
+                    }
                 });
             });
+        if let Some(i) = clicked {
+            self.select_table_row(&key, i);
+            self.view = View::Table;
+        }
+
+        // Row editor (only when there is a single-column primary key).
+        if single_pk(&columns).is_some() {
+            ui.separator();
+            self.ui_row_editor(ui, &key, &columns);
+        }
+    }
+
+    /// Add/edit/delete a row via prepared statements.
+    fn ui_row_editor(&mut self, ui: &mut egui::Ui, key: &TableKey, columns: &[Column]) {
+        if !self.open_tables.contains_key(key) {
+            return;
+        }
+        let mut action: Option<RowAction> = None;
+
+        egui::CollapsingHeader::new("Row editor")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let state = {
+                        let open = self.open_tables.get(key);
+                        if open.map(|o| o.is_new).unwrap_or(false) {
+                            "new row".to_owned()
+                        } else if open.map(|o| o.selected_row.is_some()).unwrap_or(false) {
+                            format!(
+                                "editing row {}",
+                                open.and_then(|o| o.selected_row)
+                                    .unwrap_or(0)
+                                    .saturating_add(1)
+                            )
+                        } else {
+                            "click a row to edit".to_owned()
+                        }
+                    };
+                    ui.label(RichText::new(state).weak());
+
+                    if ui.small_button("New row").clicked() {
+                        action = Some(RowAction::New);
+                    }
+                    let has_row = self
+                        .open_tables
+                        .get(key)
+                        .map(|o| o.selected_row.is_some())
+                        .unwrap_or(false);
+                    if has_row && ui.small_button("Delete").clicked() {
+                        action = Some(RowAction::Delete);
+                    }
+                });
+
+                egui::Grid::new("edit_grid")
+                    .num_columns(3)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        for (ci, col) in columns.iter().enumerate() {
+                            ui.label(&col.name);
+                            let Some(field) = self
+                                .open_tables
+                                .get_mut(key)
+                                .and_then(|o| o.edit.get_mut(ci))
+                            else {
+                                ui.add_enabled(
+                                    false,
+                                    egui::TextEdit::singleline(&mut String::new()),
+                                );
+                                ui.end_row();
+                                continue;
+                            };
+                            if field.is_null {
+                                ui.label(RichText::new("NULL").weak());
+                            } else {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut field.text)
+                                        .desired_width(240.0),
+                                );
+                            }
+                            ui.add(egui::Checkbox::new(&mut field.is_null, "null"));
+                            ui.end_row();
+                        }
+                    });
+
+                ui.horizontal(|ui| {
+                    let can_save = {
+                        let open = self.open_tables.get(key);
+                        let editing = open
+                            .map(|o| !o.is_new && o.selected_row.is_some())
+                            .unwrap_or(false)
+                            || open.map(|o| o.is_new).unwrap_or(false);
+                        editing && !open.map(|o| o.edit.is_empty()).unwrap_or(true)
+                    };
+                    if ui
+                        .add_enabled(can_save, egui::Button::new("Save changes"))
+                        .clicked()
+                    {
+                        action = Some(RowAction::Save);
+                    }
+                });
+            });
+
+        match action {
+            Some(RowAction::Save) => self.save_edit(key),
+            Some(RowAction::Delete) => self.delete_selected(key),
+            Some(RowAction::New) => {
+                if let Some(open) = self.open_tables.get_mut(key) {
+                    open.selected_row = None;
+                    open.is_new = true;
+                    open.edit = columns
+                        .iter()
+                        .map(|c| EditField {
+                            text: String::new(),
+                            is_null: c.nullable,
+                        })
+                        .collect();
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn set_filter(&mut self, key: &TableKey, filter: Option<TableFilter>) {
+        let (conn_id, database, table) = key.clone();
+        let page_size = match self.open_tables.get_mut(key) {
+            Some(open) => {
+                open.filter = filter.clone();
+                open.loading = true;
+                open.page = 0;
+                open.selected_row = None;
+                open.edit.clear();
+                open.page_size
+            }
+            None => self.page_size,
+        };
+        self.backend.send(Request::OpenTable {
+            conn_id,
+            database,
+            table,
+            filter,
+            limit: page_size,
+        });
+    }
+
+    fn select_table_row(&mut self, key: &TableKey, index: usize) {
+        let Some(open) = self.open_tables.get_mut(key) else {
+            return;
+        };
+        let Some(cells) = open.rows.get(index) else {
+            return;
+        };
+        open.selected_row = Some(index);
+        let pk_name = single_pk(&open.columns).map(str::to_owned);
+        let pk_value = pk_name.as_ref().and_then(|name| {
+            open.columns
+                .iter()
+                .position(|c| &c.name == name)
+                .and_then(|idx| cells.get(idx))
+                .and_then(|c| c.clone())
+        });
+        open.selected_pk = pk_name.map(|name| (name, pk_value));
+        open.is_new = false;
+        open.edit = open
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(ci, _col)| EditField {
+                text: cells.get(ci).and_then(Clone::clone).unwrap_or_default(),
+                is_null: cells.get(ci).is_none_or(Option::is_none),
+            })
+            .collect();
+    }
+
+    fn save_edit(&mut self, key: &TableKey) {
+        let (conn_id, database, table) = key.clone();
+        let (columns, values, pk, is_new) = {
+            let Some(open) = self.open_tables.get(key) else {
+                return;
+            };
+            let values: Vec<(String, Option<String>)> = open
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(ci, col)| {
+                    let value = open.edit.get(ci).and_then(|f| {
+                        if f.is_null {
+                            None
+                        } else {
+                            Some(f.text.clone())
+                        }
+                    });
+                    (col.name.clone(), value)
+                })
+                .collect();
+            (
+                open.columns.clone(),
+                values,
+                open.selected_pk.clone(),
+                open.is_new,
+            )
+        };
+        if is_new {
+            self.backend.send(Request::InsertRow {
+                conn_id,
+                database,
+                table,
+                columns,
+                values,
+            });
+        } else if let Some(pk) = pk {
+            self.backend.send(Request::UpdateRow {
+                conn_id,
+                database,
+                table,
+                columns,
+                values,
+                pk,
+            });
+        }
+    }
+
+    fn delete_selected(&mut self, key: &TableKey) {
+        let (conn_id, database, table) = key.clone();
+        let (columns, pk) = {
+            let Some(open) = self.open_tables.get(key) else {
+                return;
+            };
+            (open.columns.clone(), open.selected_pk.clone())
+        };
+        if let Some(pk) = pk {
+            self.backend.send(Request::DeleteRow {
+                conn_id,
+                database,
+                table,
+                columns,
+                pk,
+            });
+        }
     }
 
     fn goto_page(&mut self, key: &TableKey, page: i64) {
@@ -786,6 +1295,7 @@ impl TermdbApp {
         };
         let columns = open.columns.clone();
         let page_size = open.page_size;
+        let filter = open.filter.clone();
         let page = page.max(0);
         open.page = page;
         open.loading = true;
@@ -794,9 +1304,63 @@ impl TermdbApp {
             database,
             table,
             columns,
+            filter,
             limit: page_size,
             offset: page * page_size,
         });
+    }
+
+    fn ui_history(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("History")
+            .default_open(false)
+            .show(ui, |ui| {
+                if self.history.is_empty() {
+                    ui.label(RichText::new("no queries yet").weak());
+                }
+                let mut clicked_sql: Option<String> = None;
+                for entry in &self.history {
+                    if ui
+                        .selectable_label(false, short(&entry.sql))
+                        .on_hover_text(&entry.sql)
+                        .clicked()
+                    {
+                        clicked_sql = Some(entry.sql.clone());
+                    }
+                }
+                if let Some(sql) = clicked_sql {
+                    self.query_text = sql.clone();
+                    self.view = View::Query;
+                    self.run_query();
+                }
+                if !self.history.is_empty() && ui.small_button("Clear").clicked() {
+                    self.backend.send(Request::ClearHistory {});
+                }
+            });
+    }
+
+    fn export(&mut self, columns: &[String], rows: &[Vec<Option<String>>], format: &str) {
+        let body = match format {
+            "csv" => termdb::export::to_csv(columns, rows),
+            "json" => termdb::export::to_json(columns, rows),
+            _ => return,
+        };
+        let extension = format;
+        let mut dialog = rfd::FileDialog::new().set_file_name(format!("export.{extension}"));
+        if format == "csv" {
+            dialog = dialog.add_filter("CSV", &["csv"]);
+        } else {
+            dialog = dialog.add_filter("JSON", &["json"]);
+        }
+        if let Some(path) = dialog.save_file() {
+            match std::fs::write(&path, body) {
+                Ok(_) => self.push_log(format!(
+                    "exported {} bytes to {}",
+                    path.display(),
+                    std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+                )),
+                Err(e) => self.push_log(format!("export failed: {e}")),
+            }
+        }
     }
 
     fn ui_log(&mut self, ui: &mut egui::Ui) {
@@ -825,6 +1389,209 @@ fn total_pages(total: i64, page_size: i64) -> i64 {
     }
 }
 
+/// Truncate a query for one-line log/history display.
+fn short(sql: &str) -> String {
+    let one_line = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() > 48 {
+        let trimmed: String = one_line.chars().take(45).collect();
+        format!("{trimmed}…")
+    } else {
+        one_line
+    }
+}
+
+/// Read-only virtualized grid for ad-hoc query results (headers are plain
+/// strings; no row selection).
+fn ui_result_grid(ui: &mut egui::Ui, columns: &[String], rows: &[Vec<Option<String>>]) {
+    let mut table = TableBuilder::new(ui)
+        .striped(true)
+        .resizable(true)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::LEFT))
+        .column(TableColumn::auto());
+    for _ in columns.iter().skip(1) {
+        table = table.column(TableColumn::auto());
+    }
+    table
+        .header(24.0, |mut header| {
+            for name in columns {
+                header.col(|ui| {
+                    ui.strong(name);
+                });
+            }
+        })
+        .body(|body| {
+            body.rows(20.0, rows.len(), |mut row| {
+                let i = row.index();
+                if let Some(cells) = rows.get(i) {
+                    for cell in cells {
+                        row.col(|ui| match cell {
+                            Some(value) => {
+                                ui.label(RichText::new(value));
+                            }
+                            None => {
+                                ui.label(RichText::new("NULL").weak().italics());
+                            }
+                        });
+                    }
+                }
+            });
+        });
+}
+
+/// Extremely small SQL token-highlighter used as the editor layouter.
+const SQL_KEYWORDS: &[&str] = &[
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "AND",
+    "OR",
+    "NOT",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "LIMIT",
+    "OFFSET",
+    "ORDER",
+    "BY",
+    "GROUP",
+    "HAVING",
+    "JOIN",
+    "LEFT",
+    "RIGHT",
+    "INNER",
+    "OUTER",
+    "FULL",
+    "CROSS",
+    "AS",
+    "ON",
+    "NULL",
+    "TRUE",
+    "FALSE",
+    "LIKE",
+    "ILIKE",
+    "IS",
+    "IN",
+    "EXISTS",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "CREATE",
+    "TABLE",
+    "DROP",
+    "ALTER",
+    "PRIMARY",
+    "KEY",
+    "REFERENCES",
+    "DISTINCT",
+];
+
+fn sql_layouter(ui: &egui::Ui, buffer: &dyn TextBuffer, wrap_width: f32) -> Arc<Galley> {
+    use egui::text::{LayoutJob, TextFormat};
+    use egui::Color32;
+
+    const KEYWORD: Color32 = Color32::from_rgb(0x7d, 0xc9, 0xff);
+    const STRING: Color32 = Color32::from_rgb(0x6f, 0xa8, 0x5f);
+    const NUMBER: Color32 = Color32::from_rgb(0xd1, 0x9a, 0x66);
+    const COMMENT: Color32 = Color32::from_rgb(0x6b, 0x74, 0x80);
+    const DEFAULT: Color32 = Color32::from_rgb(0xc9, 0xd1, 0xd9);
+
+    let font_id = FontId::monospace(13.0);
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = wrap_width;
+
+    let is_keyword = |w: &str| {
+        SQL_KEYWORDS
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(w.trim()))
+    };
+    let is_number = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit() || c == '.');
+
+    let chars: Vec<char> = buffer.as_str().chars().collect();
+    let mut i = 0;
+    let mut word = String::new();
+    let mut push = |text: &str, color: Color32| {
+        if text.is_empty() {
+            return;
+        }
+        job.append(
+            text,
+            0.0,
+            TextFormat {
+                font_id: font_id.clone(),
+                color,
+                ..Default::default()
+            },
+        );
+    };
+    macro_rules! flush_word {
+        () => {
+            if !word.is_empty() {
+                let color = if is_keyword(&word) {
+                    KEYWORD
+                } else if is_number(&word) {
+                    NUMBER
+                } else {
+                    DEFAULT
+                };
+                push(&word.clone(), color);
+                word.clear();
+            }
+        };
+    }
+
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\'' => {
+                flush_word!();
+                let mut lit = String::from("'");
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '\'' {
+                        if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                            lit.push_str("''");
+                            i += 2;
+                            continue;
+                        }
+                        lit.push('\'');
+                        i += 1;
+                        break;
+                    }
+                    lit.push(chars[i]);
+                    i += 1;
+                }
+                push(&lit, STRING);
+            }
+            '-' if i + 1 < chars.len() && chars[i + 1] == '-' => {
+                flush_word!();
+                let mut comment = String::new();
+                while i < chars.len() && chars[i] != '\n' {
+                    comment.push(chars[i]);
+                    i += 1;
+                }
+                push(&comment, COMMENT);
+            }
+            c if c.is_whitespace() || matches!(c, '(' | ')' | ',' | ';') => {
+                flush_word!();
+                push(&c.to_string(), DEFAULT);
+                i += 1;
+            }
+            _ => {
+                word.push(c);
+                i += 1;
+            }
+        }
+    }
+    flush_word!();
+
+    ui.ctx().fonts_mut(|f| f.layout_job(job))
+}
+
 impl eframe::App for TermdbApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -848,11 +1615,17 @@ impl eframe::App for TermdbApp {
                     self.ui_connections(ui);
                     ui.add_space(12.0);
                     self.ui_new_connection(ui);
+                    ui.add_space(12.0);
+                    self.ui_history(ui);
                 });
             });
 
         egui::CentralPanel::default().show(ui, |ui| {
-            self.ui_central(ui);
+            if self.view == View::Query {
+                self.ui_query_workspace(ui);
+            } else {
+                self.ui_central(ui);
+            }
             ui.separator();
             self.ui_log(ui);
         });
