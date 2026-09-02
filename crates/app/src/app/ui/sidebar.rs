@@ -3,7 +3,7 @@
 
 use egui::RichText;
 
-use super::{danger_button, ghost_button, primary_button, status_dot};
+use super::{ghost_button, primary_button, status_dot};
 use crate::app::TermdbApp;
 use crate::theme;
 use termdb::db::Request;
@@ -45,61 +45,8 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
                     ui.add_space(8.0);
                 });
 
-            // Bottom dock: status + Disconnect / Delete actions.
-            ui.add_space(4.0);
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                ui.add_space(10.0);
-                egui::Frame::default()
-                    .fill(theme::CARD)
-                    .stroke(egui::Stroke::new(1.0, theme::GRID))
-                    .corner_radius(0)
-                    .inner_margin(egui::Margin::symmetric(10, 8))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new("STATUS")
-                                .small()
-                                .strong()
-                                .color(theme::TEXT_DIM),
-                        );
-                        match &app.backend_status {
-                            crate::app::BackendStatus::Starting => {
-                                ui.horizontal(|ui| {
-                                    status_dot(ui, theme::AMBER);
-                                    ui.label(RichText::new("backend starting…").small());
-                                });
-                            }
-                            crate::app::BackendStatus::Ready { .. } => {
-                                ui.horizontal(|ui| {
-                                    status_dot(ui, theme::GREEN);
-                                    ui.label(
-                                        RichText::new(format!("{} live", app.live.len())).small(),
-                                    );
-                                });
-                            }
-                        }
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            let half = (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
-                            if ui
-                                .add(danger_button("Disconnect").min_size(egui::vec2(half, 0.0)))
-                                .clicked()
-                            {
-                                app.disconnect_selected();
-                            }
-                            let mut delete = danger_button("Delete");
-                            delete = delete
-                                .fill(theme::CARD)
-                                .stroke(egui::Stroke::new(1.0, theme::RED_DARK));
-                            if ui
-                                .add(delete.min_size(egui::vec2(half, 0.0)))
-                                .on_hover_text("Remove this connection")
-                                .clicked()
-                            {
-                                app.delete_selected_connection();
-                            }
-                        });
-                    });
-            });
+            // Bottom dock removed — per-connection actions live on each row (× for
+            // disconnect, 🗑 for delete). The sidebar now simply scrolls.
         });
 }
 
@@ -131,6 +78,7 @@ impl TermdbApp {
 
             let mut select = false;
             let mut close = false;
+            let mut delete = false;
             ui.horizontal(|ui| {
                 let color = if connecting {
                     theme::AMBER
@@ -152,6 +100,13 @@ impl TermdbApp {
                 {
                     close = true;
                 }
+                if ui
+                    .add(ghost_button("🗑").small())
+                    .on_hover_text("Remove connection")
+                    .clicked()
+                {
+                    delete = true;
+                }
             });
 
             if select {
@@ -162,6 +117,9 @@ impl TermdbApp {
             }
             if close {
                 self.backend.send(Request::Disconnect { conn_id: id });
+            }
+            if delete {
+                self.delete_connection(id);
             }
         }
     }

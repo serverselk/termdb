@@ -619,19 +619,10 @@ impl TermdbApp {
         self.push_log(format!("connecting to \"{}\"…", cfg.name));
     }
 
-    /// Disconnect the currently selected live connection.
-    fn disconnect_selected(&mut self) {
-        let Some(id) = self.selected_id else { return };
-        if self.live.contains_key(&id) {
-            self.backend.send(Request::Disconnect { conn_id: id });
-        }
-    }
-
-    /// Remove the selected connection from the config store + vault.
-    fn delete_selected_connection(&mut self) {
-        let Some(id) = self.selected_id else { return };
-        self.backend.send(Request::DeleteConnection { conn_id: id });
-        self.push_log(format!("deleting connection #{id}…"));
+    /// Remove a connection (any state) from the config store + vault.
+    fn delete_connection(&mut self, conn_id: i64) {
+        self.backend.send(Request::DeleteConnection { conn_id });
+        self.push_log(format!("deleting connection #{conn_id}…"));
     }
 
     /// Toggle a table's favorite star.
