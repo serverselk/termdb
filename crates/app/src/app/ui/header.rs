@@ -4,9 +4,9 @@ use egui::RichText;
 
 use super::{icon_button, outline_button, primary_button};
 use crate::app::{BackendStatus, TermdbApp};
-use crate::theme;
 
 pub(crate) fn ui_header_bar(app: &mut TermdbApp, root: &mut egui::Ui) {
+    let pal = crate::theme::palette();
     egui::Panel::top("header")
         .exact_size(48.0)
         .show(root, |ui| {
@@ -19,7 +19,7 @@ pub(crate) fn ui_header_bar(app: &mut TermdbApp, root: &mut egui::Ui) {
                                 .monospace()
                                 .strong()
                                 .size(17.0)
-                                .color(theme::TEXT),
+                                .color(pal.text),
                         );
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -126,6 +126,7 @@ pub(crate) fn ui_logs_window(app: &mut TermdbApp, ctx: &egui::Context) {
     }
     let mut open = true;
     let mut clear = false;
+    let pal = crate::theme::palette();
     egui::Window::new("Logs")
         .open(&mut open)
         .default_width(600.0)
@@ -136,7 +137,7 @@ pub(crate) fn ui_logs_window(app: &mut TermdbApp, ctx: &egui::Context) {
                 ui.label(
                     RichText::new(format!("{} entries", app.log.len()))
                         .small()
-                        .color(theme::TEXT_DIM),
+                        .color(pal.text_dim),
                 );
                 if ui.small_button("Clear").clicked() {
                     clear = true;
@@ -150,7 +151,7 @@ pub(crate) fn ui_logs_window(app: &mut TermdbApp, ctx: &egui::Context) {
                     if app.log.is_empty() {
                         ui.label(
                             RichText::new("no log entries")
-                                .color(theme::TEXT_DIM)
+                                .color(pal.text_dim)
                                 .italics(),
                         );
                     }

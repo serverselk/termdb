@@ -7,7 +7,6 @@ use egui_extras::{Column as TableColumn, TableBuilder};
 
 use super::{outline_button, pill, primary_button};
 use crate::app::{single_pk, RecordAction, RecordPanelMode, TermdbApp};
-use crate::theme;
 use termdb::db::engine::{Column, TableFilter, FILTER_OPS};
 use termdb::db::Request;
 
@@ -33,7 +32,7 @@ impl TermdbApp {
                     ui.label(
                         RichText::new(format!("{total} rows"))
                             .small()
-                            .color(theme::TEXT_DIM),
+                            .color(crate::theme::palette().text_dim),
                     );
                     if ui
                         .add(primary_button("+ Add"))
@@ -60,12 +59,12 @@ impl TermdbApp {
                 ui.label(
                     RichText::new("pick a table in the sidebar to browse it")
                         .small()
-                        .color(theme::TEXT_DIM),
+                        .color(crate::theme::palette().text_dim),
                 );
                 ui.label(
                     RichText::new("or run an ad-hoc query in the QUERY EDITOR below")
                         .small()
-                        .color(theme::TEXT_DIM),
+                        .color(crate::theme::palette().text_dim),
                 );
                 ui.add_space(8.0);
             }
@@ -123,7 +122,7 @@ impl TermdbApp {
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if loading {
-                    ui.label(RichText::new("…").color(theme::TEXT_DIM));
+                    ui.label(RichText::new("…").color(crate::theme::palette().text_dim));
                 }
                 ui.label(format!("{total} rows"));
                 let next =
@@ -165,7 +164,7 @@ impl TermdbApp {
             ui.label(
                 RichText::new("loading table…")
                     .small()
-                    .color(theme::TEXT_DIM),
+                    .color(crate::theme::palette().text_dim),
             );
             return;
         }
@@ -189,14 +188,14 @@ impl TermdbApp {
         }
 
         ui.horizontal(|ui| {
-            if pill(ui, "+ Add Filter", theme::BLUE).clicked() {
+            if pill(ui, "+ Add Filter", crate::theme::palette().blue).clicked() {
                 self.filter_open = !self.filter_open;
             }
             if let Some(f) = &active_filter {
                 if pill(
                     ui,
                     &format!("{} {op} \"{}\"", f.column, f.value, op = f.op),
-                    theme::AMBER,
+                    crate::theme::palette().amber,
                 )
                 .clicked()
                 {
@@ -293,7 +292,11 @@ impl TermdbApp {
                         );
                         ui.vertical(|ui| {
                             ui.strong(title);
-                            ui.label(RichText::new(&col.ty).small().color(theme::TEXT_DIM));
+                            ui.label(
+                                RichText::new(&col.ty)
+                                    .small()
+                                    .color(crate::theme::palette().text_dim),
+                            );
                         })
                         .response
                         .on_hover_text(tooltip);
@@ -321,7 +324,9 @@ impl TermdbApp {
                                     }
                                     None => {
                                         ui.label(
-                                            RichText::new("NULL").color(theme::TEXT_DIM).italics(),
+                                            RichText::new("NULL")
+                                                .color(crate::theme::palette().text_dim)
+                                                .italics(),
                                         );
                                     }
                                 });
@@ -337,8 +342,11 @@ impl TermdbApp {
                                 if ui
                                     .add(
                                         egui::Button::new("Delete")
-                                            .fill(crate::theme::CARD)
-                                            .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG)),
+                                            .fill(crate::theme::palette().card)
+                                            .stroke(egui::Stroke::new(
+                                                1.0,
+                                                crate::theme::palette().border_strong,
+                                            )),
                                     )
                                     .clicked()
                                 {

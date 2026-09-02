@@ -8,7 +8,6 @@ use egui_extras::{Column as TableColumn, TableBuilder};
 
 use super::{primary_button, section_header, RESULTS_GRID_HEIGHT};
 use crate::app::TermdbApp;
-use crate::theme;
 use termdb::db::Request;
 
 impl TermdbApp {
@@ -44,7 +43,7 @@ impl TermdbApp {
             ui.label(
                 RichText::new("ad-hoc SQL runs on the selected connection (results below)")
                     .small()
-                    .color(theme::TEXT_DIM),
+                    .color(crate::theme::palette().text_dim),
             );
         }
         self.query_open = open;
@@ -67,7 +66,7 @@ impl TermdbApp {
             if self.history.is_empty() {
                 ui.label(
                     RichText::new("No query history")
-                        .color(theme::TEXT_DIM)
+                        .color(crate::theme::palette().text_dim)
                         .italics(),
                 );
             }
@@ -103,7 +102,7 @@ impl TermdbApp {
                         state.rows.len()
                     ))
                     .small()
-                    .color(theme::TEXT_DIM),
+                    .color(crate::theme::palette().text_dim),
                 );
                 if ui.small_button("JSON").clicked() {
                     export = Some("json");
@@ -122,7 +121,7 @@ impl TermdbApp {
             } else {
                 ui.label(
                     RichText::new("Execute a query to see results")
-                        .color(theme::TEXT_DIM)
+                        .color(crate::theme::palette().text_dim)
                         .italics(),
                 );
             }
@@ -163,7 +162,11 @@ fn ui_result_grid(ui: &mut egui::Ui, columns: &[String], rows: &[Vec<Option<Stri
                                 ui.label(RichText::new(value));
                             }
                             None => {
-                                ui.label(RichText::new("NULL").color(theme::TEXT_DIM).italics());
+                                ui.label(
+                                    RichText::new("NULL")
+                                        .color(crate::theme::palette().text_dim)
+                                        .italics(),
+                                );
                             }
                         });
                     }

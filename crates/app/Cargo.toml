@@ -11,11 +11,13 @@ eframe = "0.36"
 egui = "0.36"
 egui_extras = "0.36"
 rfd = "0.15"
+serde.workspace = true
 serde_json.workspace = true
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql", "postgres"] }
 termdb-core = { path = "../core" }
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
