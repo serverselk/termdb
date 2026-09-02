@@ -1,20 +1,24 @@
-//! egui application shell: connections, database/table sidebar, virtualized
-//! grid, query editor with history, and row editing (M4).
+//! Application shell: state, backend event handling, and the root layout.
+//!
+//! Rendering lives in `crate::app::ui::{header, sidebar, table, query}` — this
+//! module owns the `TermdbApp` state and the pieces (filters, pagination, row
+//! editor, queries) that mutate it.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use egui::{text::Galley, FontId, RichText, TextBuffer};
-use egui_extras::{Column as TableColumn, TableBuilder};
-use termdb::db::engine::{Column, TableFilter, FILTER_OPS};
+use egui::RichText;
+use termdb::db::engine::{Column, TableFilter};
 use termdb::db::{Backend, Event, Request};
 use termdb_core::{ConfigStore, ConnectionConfig, Engine, HistoryEntry, VaultKind};
+
+pub mod ui;
+
+use crate::app::ui::{header, sidebar, workspace};
 
 /// Live per-connection state, mirrored from the backend via events.
 struct LiveConnection {
     connecting: bool,
-    server_version: String,
     databases: Vec<String>,
     tables: HashMap<String, Vec<String>>,
     loading_tables: HashSet<String>,
@@ -26,7 +30,6 @@ impl LiveConnection {
     fn placeholder() -> Self {
         Self {
             connecting: true,
-            server_version: String::new(),
             databases: Vec::new(),
             tables: HashMap::new(),
             loading_tables: HashSet::new(),
@@ -63,7 +66,7 @@ impl OpenTable {
     }
 }
 
-/// Right-hand record panel, mirroring tup-db-client's add/edit side panel.
+/// Right-hand record panel: add/edit a single row.
 struct RecordPanel {
     /// Table being edited and its target key.
     key: TableKey,
@@ -71,7 +74,7 @@ struct RecordPanel {
     /// The row being edited (edit mode); `None` for a new record.
     row: Option<usize>,
     /// Per-column, ordered like `open.columns`. Empty → NULL (when nullable)
-    /// or omitted (when the column is required), mirrors the Electron app.
+    /// or omitted (when the column is required).
     fields: Vec<String>,
 }
 
@@ -79,6 +82,86 @@ struct RecordPanel {
 enum RecordPanelMode {
     Add,
     Edit,
+}
+
+/// Result set of an ad-hoc query.
+struct QueryState {
+    conn_id: i64,
+    columns: Vec<String>,
+    rows: Vec<Vec<Option<String>>>,
+}
+
+enum RecordAction {
+    Edit,
+    Delete,
+}
+
+/// A pending destructive action awaiting confirmation.
+struct ConfirmDialog {
+    title: String,
+    message: String,
+    action: ConfirmAction,
+}
+
+enum ConfirmAction {
+    DeleteRow { key: TableKey, row: usize },
+    DeleteConnection { conn_id: i64 },
+}
+
+type TableKey = (i64, String, String);
+
+/// How far along backend startup / last round-trip we are.
+enum BackendStatus {
+    Starting,
+    Ready {
+        version: String,
+        vault_kind: VaultKind,
+        last_pong: Option<PongResult>,
+    },
+}
+
+struct PongResult {
+    payload: String,
+    latency_ms: u64,
+}
+
+/// Form state for the new-connection modal.
+struct NewConnectionForm {
+    name: String,
+    engine: Engine,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    database: String,
+}
+
+impl Default for NewConnectionForm {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            engine: Engine::Postgres,
+            host: "localhost".to_owned(),
+            port: Engine::Postgres.default_port(),
+            username: "postgres".to_owned(),
+            password: String::new(),
+            database: String::new(),
+        }
+    }
+}
+
+impl NewConnectionForm {
+    fn first_problem(&self) -> Option<String> {
+        if self.name.trim().is_empty() {
+            Some("name is required".into())
+        } else if self.host.trim().is_empty() {
+            Some("host is required".into())
+        } else if self.username.trim().is_empty() {
+            Some("username is required".into())
+        } else {
+            None
+        }
+    }
 }
 
 /// Single-column primary key usable for row editing.
@@ -95,20 +178,8 @@ fn single_pk(columns: &[Column]) -> Option<&str> {
     }
 }
 
-const BADGE_PK: egui::Color32 = egui::Color32::from_rgb(0xf5, 0x9e, 0x0b);
-const BADGE_AI: egui::Color32 = egui::Color32::from_rgb(0x10, 0xb9, 0x81);
-const BADGE_REQUIRED: egui::Color32 = egui::Color32::from_rgb(0xf4, 0x43, 0x36);
-
-/// Colored chip like tup-db-client's PK / AI badges.
-fn badge(text: &str, color: egui::Color32) -> RichText {
-    RichText::new(text)
-        .small()
-        .color(color)
-        .background_color(egui::Color32::from_black_alpha(120))
-}
-
-/// Auto-increment-ish columns (MySQL `auto_increment`, PG serial `nextval`
-/// and identity/generated columns). Disabled in the record panel; empty on add.
+/// Auto-increment-ish columns (MySQL `auto_increment`, PG serial `nextval`,
+/// identity/generated). Disabled in the record panel; empty on add.
 fn auto_increment_col(col: &Column) -> bool {
     let extra = col.extra.to_lowercase();
     extra.contains("auto_increment")
@@ -168,106 +239,41 @@ fn record_pk(open: &OpenTable, row: usize) -> Option<(String, Option<String>)> {
     Some((name, value))
 }
 
-/// Result set of an ad-hoc query.
-struct QueryState {
-    conn_id: i64,
-    columns: Vec<String>,
-    rows: Vec<Vec<Option<String>>>,
-}
-
-/// Which view owns the central panel.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum View {
-    Table,
-    Query,
-}
-
-enum RecordAction {
-    Edit,
-    Delete,
-}
-
-type TableKey = (i64, String, String);
-
-/// How far along backend startup / last round-trip we are.
-enum BackendStatus {
-    Starting,
-    Ready {
-        version: String,
-        vault_kind: VaultKind,
-        last_pong: Option<PongResult>,
-    },
-}
-
-struct PongResult {
-    payload: String,
-    latency_ms: u64,
-}
-
-/// Form state for the "New connection" section.
-pub struct NewConnectionForm {
-    name: String,
-    engine: Engine,
-    host: String,
-    port: u16,
-    username: String,
-    password: String,
-    database: String,
-}
-
-impl Default for NewConnectionForm {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            engine: Engine::Postgres,
-            host: "localhost".to_owned(),
-            port: Engine::Postgres.default_port(),
-            username: "postgres".to_owned(),
-            password: String::new(),
-            database: String::new(),
-        }
-    }
-}
-
-impl NewConnectionForm {
-    fn first_problem(&self) -> Option<String> {
-        if self.name.trim().is_empty() {
-            Some("name is required".into())
-        } else if self.host.trim().is_empty() {
-            Some("host is required".into())
-        } else if self.username.trim().is_empty() {
-            Some("username is required".into())
-        } else {
-            None
-        }
-    }
-}
-
 pub struct TermdbApp {
     backend: Backend,
     started: Instant,
     connections: Vec<ConnectionConfig>,
     selected_id: Option<i64>,
     live: HashMap<i64, LiveConnection>,
-    /// The most recently clicked table: `(conn_id, database, table)`.
+    /// `(conn_id, database, table)` of the table currently open, if any.
     table_selection: Option<TableKey>,
     open_tables: HashMap<TableKey, OpenTable>,
+    /// Favorite (starred) tables, cosmetic.
+    favorites: HashSet<TableKey>,
     page_size: i64,
-    view: View,
-    /// Query editor buffer.
+    /// Query editor + section collapse states.
     query_text: String,
-    /// Result of the last ad-hoc query, if any.
     query_state: Option<QueryState>,
+    table_open: bool,
+    query_open: bool,
+    history_open: bool,
+    results_open: bool,
+    /// Overlay windows.
+    show_new_connection: bool,
+    show_settings: bool,
+    show_logs: bool,
     /// Previous runs, newest first.
     history: Vec<HistoryEntry>,
-    /// WHERE-builder state (filter row).
+    /// WHERE-builder state.
     filter_col: String,
     filter_op: String,
     filter_val: String,
-    /// Add/Edit side panel (tup-db-client style).
+    /// Whether the "+ Add Filter" builder row is visible.
+    filter_open: bool,
+    /// Add/Edit record side panel.
     record_panel: Option<RecordPanel>,
-    /// Armed delete-confirmation: `(table, row)` deleted on the second click.
-    delete_arm: Option<(TableKey, usize)>,
+    /// Pending destructive action awaiting confirmation.
+    confirm: Option<ConfirmDialog>,
     form: NewConnectionForm,
     saving: bool,
     backend_status: BackendStatus,
@@ -278,8 +284,7 @@ impl TermdbApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, backend: Backend) -> Self {
         let started = Instant::now();
 
-        // One-time local read on the UI thread; it's our own tiny sqlite file
-        // (microseconds), not a network database.
+        // One-time local read on the UI thread (our own tiny sqlite file).
         let mut connections = Vec::new();
         if let Ok(store) = ConfigStore::open(&ConfigStore::default_path()) {
             connections = store.list_connections().unwrap_or_default();
@@ -300,16 +305,24 @@ impl TermdbApp {
             live: HashMap::new(),
             table_selection: None,
             open_tables: HashMap::new(),
+            favorites: HashSet::new(),
             page_size: 50,
-            view: View::Table,
             query_text: String::new(),
             query_state: None,
+            table_open: true,
+            query_open: true,
+            history_open: false,
+            results_open: true,
+            show_new_connection: false,
+            show_settings: false,
+            show_logs: false,
             history: Vec::new(),
             filter_col: String::new(),
             filter_op: "=".to_owned(),
             filter_val: String::new(),
+            filter_open: false,
             record_panel: None,
-            delete_arm: None,
+            confirm: None,
             form: NewConnectionForm::default(),
             saving: false,
             backend_status: BackendStatus::Starting,
@@ -348,27 +361,26 @@ impl TermdbApp {
             }
             Event::ConnectionSaved { cfg } => {
                 self.saving = false;
-                // Upsert — a name may collide during save before error is raised.
                 if let Some(existing) = self.connections.iter_mut().find(|c| c.name == cfg.name) {
                     *existing = cfg.clone();
                 } else {
                     self.connections.push(cfg.clone());
                 }
                 self.selected_id = cfg.id;
+                self.show_new_connection = false;
                 self.push_log(format!("saved connection \"{}\"", cfg.name));
             }
             Event::Connected {
                 conn_id,
                 cfg,
-                server_version,
                 databases,
+                ..
             } => {
                 let name = cfg.name.clone();
                 self.live.insert(
                     conn_id,
                     LiveConnection {
                         connecting: false,
-                        server_version,
                         databases,
                         tables: HashMap::new(),
                         loading_tables: HashSet::new(),
@@ -390,6 +402,7 @@ impl TermdbApp {
             Event::Disconnected { conn_id, name } => {
                 self.live.remove(&conn_id);
                 self.open_tables.retain(|(c, _, _), _| *c != conn_id);
+                self.favorites.retain(|(c, _, _)| *c != conn_id);
                 if let Some((c, _, _)) = &self.table_selection {
                     if *c == conn_id {
                         self.table_selection = None;
@@ -398,7 +411,6 @@ impl TermdbApp {
                 if let Some(query) = &self.query_state {
                     if query.conn_id == conn_id {
                         self.query_state = None;
-                        self.view = View::Table;
                     }
                 }
                 if let Some(panel) = &self.record_panel {
@@ -406,9 +418,13 @@ impl TermdbApp {
                         self.record_panel = None;
                     }
                 }
-                if let Some((key, _)) = &self.delete_arm {
-                    if key.0 == conn_id {
-                        self.delete_arm = None;
+                if let Some(ConfirmDialog {
+                    action: ConfirmAction::DeleteConnection { conn_id: target },
+                    ..
+                }) = &self.confirm
+                {
+                    if *target == conn_id {
+                        self.confirm = None;
                     }
                 }
                 self.push_log(format!("disconnected \"{name}\""));
@@ -496,13 +512,13 @@ impl TermdbApp {
                 columns,
                 rows,
             } => {
-                self.view = View::Query;
                 let n = rows.len();
                 self.query_state = Some(QueryState {
                     conn_id,
                     columns,
                     rows: rows.clone(),
                 });
+                self.results_open = true;
                 let name = self
                     .connections
                     .iter()
@@ -525,9 +541,7 @@ impl TermdbApp {
                 self.push_log("history cleared".into());
             }
             Event::RowChanged { conn_id } => {
-                self.delete_arm = None;
                 self.record_panel = None;
-                // Reload whatever table the connection is showing.
                 if let Some((c, _, _)) = &self.table_selection {
                     if *c == conn_id {
                         let key = self.table_selection.clone().unwrap();
@@ -542,6 +556,32 @@ impl TermdbApp {
             }
             Event::MutationFailed { message } => {
                 self.push_log(format!("edit failed: {message}"));
+            }
+            Event::ConnectionDeleted { conn_id, name } => {
+                self.connections.retain(|c| c.id != Some(conn_id));
+                self.live.remove(&conn_id);
+                self.open_tables.retain(|(c, _, _), _| *c != conn_id);
+                self.favorites.retain(|(c, _, _)| *c != conn_id);
+                if self.selected_id == Some(conn_id) {
+                    self.selected_id = None;
+                }
+                if let Some((c, _, _)) = &self.table_selection {
+                    if *c == conn_id {
+                        self.table_selection = None;
+                    }
+                }
+                if let Some(query) = &self.query_state {
+                    if query.conn_id == conn_id {
+                        self.query_state = None;
+                    }
+                }
+                if let Some(panel) = &self.record_panel {
+                    if panel.key.0 == conn_id {
+                        self.record_panel = None;
+                    }
+                }
+                self.confirm = None;
+                self.push_log(format!("deleted connection \"{name}\""));
             }
             Event::StoreFailed { message } => {
                 self.saving = false;
@@ -583,279 +623,33 @@ impl TermdbApp {
         self.push_log(format!("saving connection \"{}\"…", self.form.name.trim()));
     }
 
-    fn ui_status_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let label = match &self.backend_status {
-                BackendStatus::Starting => "backend: connecting…".to_owned(),
-                BackendStatus::Ready {
-                    version,
-                    vault_kind,
-                    last_pong,
-                } => {
-                    let live = self.live.len();
-                    let mut s = format!(
-                        "backend: ready v{version} · {} · {live} live",
-                        vault_kind.label()
-                    );
-                    if let Some(pong) = last_pong {
-                        s.push_str(&format!(
-                            " · last ping \"{}\": {}ms",
-                            pong.payload, pong.latency_ms
-                        ));
-                    }
-                    s
-                }
-            };
-            ui.label(label);
-
-            let ready = matches!(&self.backend_status, BackendStatus::Ready { .. });
-            if ui
-                .add_enabled(ready, egui::Button::new("Ping backend"))
-                .clicked()
-            {
-                self.backend.send(Request::Ping {
-                    payload: "hello".into(),
-                });
-                self.push_log("ping sent".into());
-            }
-        });
-    }
-
-    fn ui_connections(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Connections");
-        if self.connections.is_empty() {
-            ui.label(RichText::new("no saved connections yet").weak());
-        }
-
-        let connection_ids: Vec<i64> = self.connections.iter().filter_map(|c| c.id).collect();
-
-        for id in connection_ids {
-            let Some(cfg) = self.connections.iter().find(|c| c.id == Some(id)) else {
-                continue;
-            };
-            let label = format!("{} · {}:{}", cfg.name, cfg.engine.label(), cfg.port);
-
-            let mut connect = false;
-            let mut disconnect = false;
-            ui.horizontal(|ui| {
-                let selected = self.selected_id == Some(id);
-                if ui.selectable_label(selected, label).clicked() {
-                    self.selected_id = Some(id);
-                }
-                match self.live.get(&id) {
-                    Some(live) if live.connecting => {
-                        ui.label(RichText::new("connecting…").weak().small());
-                    }
-                    Some(_) => {
-                        if ui.small_button("Disconnect").clicked() {
-                            disconnect = true;
-                        }
-                    }
-                    None => {
-                        if ui.small_button("Connect").clicked() {
-                            connect = true;
-                        }
-                    }
-                }
-            });
-
-            if connect {
-                self.live.insert(id, LiveConnection::placeholder());
-                self.backend.send(Request::Connect { conn_id: id });
-            }
-            if disconnect {
-                self.backend.send(Request::Disconnect { conn_id: id });
-            }
-
-            self.ui_connection_tree(ui, id);
-        }
-    }
-
-    /// Databases (collapsing) → tables underneath a live connection.
-    fn ui_connection_tree(&mut self, ui: &mut egui::Ui, conn_id: i64) {
-        let Some(live) = self.live.get(&conn_id) else {
+    /// Connect to `conn_id`, inserting a placeholder while the pool opens.
+    fn connect_to(&mut self, conn_id: i64) {
+        let Some(cfg) = self.connections.iter().find(|c| c.id == Some(conn_id)) else {
             return;
         };
-        if live.connecting || live.databases.is_empty() {
+        self.live.insert(conn_id, LiveConnection::placeholder());
+        self.selected_id = Some(conn_id);
+        self.backend.send(Request::Connect { conn_id });
+        self.push_log(format!("connecting to \"{}\"…", cfg.name));
+    }
+
+    /// Toggle a table's favorite star.
+    fn toggle_favorite(&mut self, key: TableKey) {
+        if !self.favorites.remove(&key) {
+            self.favorites.insert(key);
+        }
+    }
+
+    /// Open a favorited (or any) table directly.
+    fn open_table(&mut self, key: TableKey) {
+        if !self.live.contains_key(&key.0) {
             return;
         }
-        let databases = live.databases.clone();
-
-        let live = self.live.get_mut(&conn_id).expect("connection still live");
-        for db in databases {
-            let tables = live.tables.get(&db).cloned();
-            let loading = live.loading_tables.contains(&db);
-
-            let resp = egui::CollapsingHeader::new(RichText::new(&db).strong())
-                .id_salt(("db", conn_id, &db))
-                .show(ui, |ui| {
-                    if let Some(ts) = &tables {
-                        for table in ts {
-                            let active = live.selected_database.as_deref() == Some(db.as_str())
-                                && live.selected_table.as_deref() == Some(table.as_str());
-                            if ui.selectable_label(active, table).clicked() {
-                                live.selected_database = Some(db.clone());
-                                live.selected_table = Some(table.clone());
-                                self.table_selection = Some((conn_id, db.clone(), table.clone()));
-                                self.view = View::Table;
-                            }
-                        }
-                    } else if loading {
-                        ui.label("loading…");
-                    } else {
-                        ui.label(RichText::new("click to load tables").weak());
-                    }
-                });
-
-            let needs_load = tables.is_none() && !loading;
-            if resp.header_response.clicked() && needs_load {
-                live.loading_tables.insert(db.clone());
-                live.selected_database = Some(db.clone());
-                self.backend.send(Request::ListTables {
-                    conn_id,
-                    database: db,
-                });
-            }
-        }
-    }
-
-    fn ui_new_connection(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("New connection")
-            .default_open(self.connections.is_empty())
-            .show(ui, |ui| {
-                egui::Grid::new("conn_form")
-                    .num_columns(2)
-                    .spacing([10.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Name");
-                        ui.text_edit_singleline(&mut self.form.name);
-                        ui.end_row();
-
-                        ui.label("Engine");
-                        let prev = self.form.engine;
-                        egui::ComboBox::from_id_salt("conn_engine")
-                            .selected_text(self.form.engine.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.form.engine,
-                                    Engine::Postgres,
-                                    "PostgreSQL",
-                                );
-                                ui.selectable_value(&mut self.form.engine, Engine::Mysql, "MySQL");
-                            });
-                        if self.form.engine != prev {
-                            self.form.port = self.form.engine.default_port();
-                        }
-                        ui.end_row();
-
-                        ui.label("Host");
-                        ui.text_edit_singleline(&mut self.form.host);
-                        ui.end_row();
-
-                        ui.label("Port");
-                        ui.add(egui::DragValue::new(&mut self.form.port).range(1..=65535));
-                        ui.end_row();
-
-                        ui.label("Username");
-                        ui.text_edit_singleline(&mut self.form.username);
-                        ui.end_row();
-
-                        ui.label("Password");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.form.password)
-                                .password(true)
-                                .hint_text("stored in the vault"),
-                        );
-                        ui.end_row();
-
-                        ui.label("Database");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.form.database)
-                                .hint_text("optional initial database"),
-                        );
-                        ui.end_row();
-                    });
-
-                if let Some(problem) = self.form.first_problem() {
-                    ui.label(
-                        RichText::new(problem).color(egui::Color32::from_rgb(0xff, 0x53, 0x70)),
-                    );
-                }
-                if ui
-                    .add_enabled(!self.saving, egui::Button::new("Save connection"))
-                    .clicked()
-                    && self.form.first_problem().is_none()
-                {
-                    self.save_form();
-                }
-            });
-    }
-
-    fn ui_central(&mut self, ui: &mut egui::Ui) {
-        if let Some(key) = self.table_selection.clone() {
-            self.ui_open_table(ui, key);
-        } else {
-            self.ui_connection_details(ui);
-        }
-    }
-
-    /// Query editor + results workspace. Lives in the central panel when the
-    /// last action was running a query (clicking a table returns to it).
-    fn ui_query_workspace(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("SQL");
-            ui.separator();
-            let live = self.selected_id.map(|id| self.live.contains_key(&id));
-            if ui
-                .add_enabled(
-                    live == Some(true) && !self.query_text.trim().is_empty(),
-                    egui::Button::new("Run ▸"),
-                )
-                .clicked()
-            {
-                self.run_query();
-            }
-            if let Some(state) = &self.query_state {
-                ui.label(format!(
-                    "{} column(s) · {} row(s)",
-                    state.columns.len(),
-                    state.rows.len()
-                ));
-                ui.separator();
-                if ui.small_button("Export CSV").clicked() {
-                    self.export_snapshot("csv");
-                }
-                if ui.small_button("Export JSON").clicked() {
-                    self.export_snapshot("json");
-                }
-            }
-        });
-
-        ui.add(
-            egui::TextEdit::multiline(&mut self.query_text)
-                .code_editor()
-                .hint_text("SELECT * FROM customers;\n-- run with the button above")
-                .desired_rows(5)
-                .layouter(&mut sql_layouter),
-        );
-
-        ui.separator();
-        if let Some(state) = &self.query_state {
-            let columns: Vec<String> = state.columns.clone();
-            let rows = &state.rows;
-            ui_result_grid(ui, &columns, rows);
-        } else if self.query_text.trim().is_empty() {
-            ui.label(RichText::new("pick a connected server and run a query").weak());
-        } else {
-            ui.label(RichText::new("ready — press Run ▸").weak());
-        }
-    }
-
-    fn export_snapshot(&mut self, format: &str) {
-        if let Some(state) = self.query_state.as_ref() {
-            let columns = state.columns.clone();
-            let rows = state.rows.clone();
-            self.export(&columns, &rows, format);
+        self.table_selection = Some(key.clone());
+        if let Some(live) = self.live.get_mut(&key.0) {
+            live.selected_database = Some(key.1.clone());
+            live.selected_table = Some(key.2.clone());
         }
     }
 
@@ -876,343 +670,40 @@ impl TermdbApp {
         self.backend.send(Request::RunQuery { conn_id, sql });
     }
 
-    fn ui_connection_details(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Details");
-        if let Some(id) = self.selected_id {
-            if let Some(cfg) = self.connections.iter().find(|c| c.id == Some(id)) {
-                egui::Grid::new("conn_details")
-                    .num_columns(2)
-                    .spacing([10.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Name");
-                        ui.label(&cfg.name);
-                        ui.end_row();
-                        ui.label("Engine");
-                        ui.label(cfg.engine.label());
-                        ui.end_row();
-                        ui.label("Host");
-                        ui.label(format!("{}:{}", cfg.host, cfg.port));
-                        ui.end_row();
-                        ui.label("Username");
-                        ui.label(&cfg.username);
-                        ui.end_row();
-                        ui.label("Database");
-                        ui.label(cfg.database.as_deref().unwrap_or("(default)"));
-                        ui.end_row();
-                        ui.label("SSL");
-                        ui.label(if cfg.ssl { "enabled" } else { "disabled" });
-                        ui.end_row();
-                    });
-                ui.add_space(8.0);
+    fn export_snapshot(&mut self, format: &str) {
+        if let Some(state) = self.query_state.as_ref() {
+            let columns = state.columns.clone();
+            let rows = state.rows.clone();
+            self.export(&columns, &rows, format);
+        }
+    }
 
-                if let Some(live) = self.live.get(&id) {
-                    ui.label(
-                        RichText::new(format!("● connected — {}", live.server_version))
-                            .color(egui::Color32::from_rgb(0x56, 0xd3, 0x64)),
-                    );
-                    ui.label(format!("{} database(s)", live.databases.len()));
-                } else {
-                    ui.label(
-                        RichText::new("connect from the sidebar to browse databases and tables")
-                            .weak()
-                            .italics(),
-                    );
-                }
-            }
+    fn export(&mut self, columns: &[String], rows: &[Vec<Option<String>>], format: &str) {
+        let body = match format {
+            "csv" => termdb::export::to_csv(columns, rows),
+            "json" => termdb::export::to_json(columns, rows),
+            _ => return,
+        };
+        let extension = format;
+        let mut dialog = rfd::FileDialog::new().set_file_name(format!("export.{extension}"));
+        if format == "csv" {
+            dialog = dialog.add_filter("CSV", &["csv"]);
         } else {
-            ui.label(RichText::new("select a connection, or add one").weak());
+            dialog = dialog.add_filter("JSON", &["json"]);
         }
-    }
-
-    /// Central panel for a selected table: toolbar + filter + grid + row editor.
-    fn ui_open_table(&mut self, ui: &mut egui::Ui, key: TableKey) {
-        let (conn_id, database, table) = key.clone();
-        if !self.live.contains_key(&conn_id) {
-            self.table_selection = None;
-            return;
-        }
-
-        // Lazy open: first time this table is shown, ask the backend.
-        if !self.open_tables.contains_key(&key) {
-            self.open_tables
-                .insert(key.clone(), OpenTable::placeholder(self.page_size));
-            self.backend.send(Request::OpenTable {
-                conn_id,
-                database: database.clone(),
-                table: table.clone(),
-                filter: None,
-                limit: self.page_size,
-            });
-            self.push_log(format!("opening \"{database}.{table}\"…"));
-        }
-
-        let loading = self
-            .open_tables
-            .get(&key)
-            .map(|o| o.loading)
-            .unwrap_or(false);
-        let loaded = self
-            .open_tables
-            .get(&key)
-            .map(|o| !o.columns.is_empty())
-            .unwrap_or(false);
-        let page = self.open_tables.get(&key).map(|o| o.page).unwrap_or(0);
-        let total = self.open_tables.get(&key).map(|o| o.total).unwrap_or(0);
-        let page_size = self
-            .open_tables
-            .get(&key)
-            .map(|o| o.page_size)
-            .unwrap_or(self.page_size);
-        let pages = total_pages(total, page_size);
-        let on_last = page + 1 >= pages;
-        let prev_size = self.page_size;
-
-        ui.horizontal(|ui| {
-            ui.heading(format!("{database} › {table}"));
-            ui.separator();
-
-            if loaded && ui.button("+ Add").clicked() {
-                self.open_record_panel(&key, RecordPanelMode::Add, None);
-            }
-
-            egui::ComboBox::from_id_salt("page_size")
-                .selected_text(format!("{} / page", self.page_size))
-                .show_ui(ui, |ui| {
-                    for size in [25i64, 50, 100, 200] {
-                        ui.selectable_value(&mut self.page_size, size, format!("{size} / page"));
-                    }
-                });
-
-            ui.separator();
-            let prev = ui.add_enabled(loaded && page > 0 && !loading, egui::Button::new("‹ Prev"));
-            if prev.clicked() {
-                self.goto_page(&key, page - 1);
-            }
-            if loaded {
-                ui.label(format!("page {} / {}", page + 1, pages));
-            }
-            let next = ui.add_enabled(loaded && !on_last && !loading, egui::Button::new("Next ›"));
-            if next.clicked() {
-                self.goto_page(&key, page + 1);
-            }
-            ui.label(format!("{total} rows"));
-            if loading {
-                ui.label(RichText::new("…").weak());
-            }
-        });
-
-        // Page-size change reloads from page 0.
-        if self.page_size != prev_size && loaded {
-            if let Some(open) = self.open_tables.get_mut(&key) {
-                open.page_size = self.page_size;
-            }
-            self.goto_page(&key, 0);
-        }
-
-        if !loaded {
-            ui.label(RichText::new("loading table…").weak());
-            return;
-        }
-
-        let columns = self
-            .open_tables
-            .get(&key)
-            .map(|o| o.columns.clone())
-            .unwrap_or_default();
-        let row_count = self
-            .open_tables
-            .get(&key)
-            .map(|o| o.rows.len())
-            .unwrap_or(0);
-        let active_filter = self.open_tables.get(&key).and_then(|o| o.filter.clone());
-
-        // WHERE-builder row.
-        let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
-        if !col_names.is_empty() && !col_names.contains(&self.filter_col) {
-            self.filter_col = col_names[0].clone();
-        }
-        ui.horizontal(|ui| {
-            ui.label("Filter:");
-            egui::ComboBox::from_id_salt("filter_col")
-                .width(120.0)
-                .selected_text(self.filter_col.clone())
-                .show_ui(ui, |ui| {
-                    for c in &col_names {
-                        ui.selectable_value(&mut self.filter_col, c.clone(), c);
-                    }
-                });
-            egui::ComboBox::from_id_salt("filter_op")
-                .selected_text(self.filter_op.clone())
-                .show_ui(ui, |ui| {
-                    for op in FILTER_OPS {
-                        let value = (*op).to_owned();
-                        ui.selectable_value(&mut self.filter_op, value.clone(), value);
-                    }
-                });
-            ui.add(
-                egui::TextEdit::singleline(&mut self.filter_val)
-                    .hint_text("value")
-                    .desired_width(160.0),
-            );
-            if ui
-                .add_enabled(!self.filter_val.is_empty(), egui::Button::new("Apply"))
-                .clicked()
-            {
-                let filter = TableFilter {
-                    column: self.filter_col.clone(),
-                    op: self.filter_op.clone(),
-                    value: self.filter_val.clone(),
-                };
-                self.set_filter(&key, Some(filter));
-            }
-            if active_filter.is_some() && ui.small_button("Clear").clicked() {
-                self.set_filter(&key, None);
-            }
-            if let Some(f) = &active_filter {
-                ui.label(
-                    RichText::new(format!("{} {op} \"{}\"", f.column, f.value, op = f.op))
-                        .weak()
-                        .italics(),
-                );
-            }
-        });
-
-        // Grid with row selection, per-row actions and double-click-to-edit.
-        // (tup-db-client parity: actions column only when we can edit/delete,
-        // i.e. the table has a single-column primary key.)
-        let has_pk = single_pk(&columns).is_some();
-        let mut clicked: Option<usize> = None;
-        let mut double_clicked: Option<usize> = None;
-        let mut row_action: Option<(usize, RecordAction)> = None;
-        let ctx = ui.ctx().clone();
-        let mut table = TableBuilder::new(ui)
-            .striped(true)
-            .resizable(true)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::LEFT))
-            .column(TableColumn::auto());
-        for _ in columns.iter().skip(1) {
-            table = table.column(TableColumn::auto());
-        }
-        if has_pk {
-            table = table.column(TableColumn::exact(130.0));
-        }
-        table
-            .header(38.0, |mut header| {
-                for col in &columns {
-                    header.col(|ui| {
-                        let title = if col.key == "PRI" {
-                            format!("{} (PK)", col.name)
-                        } else {
-                            col.name.clone()
-                        };
-                        let tooltip = format!(
-                            "Type: {}\nNull: {}\nKey: {}\nDefault: {}\nExtra: {}",
-                            col.ty,
-                            if col.nullable { "yes" } else { "no" },
-                            if col.key.is_empty() { "—" } else { &col.key },
-                            col.default.as_deref().unwrap_or("—"),
-                            if col.extra.is_empty() {
-                                "—"
-                            } else {
-                                &col.extra
-                            },
-                        );
-                        ui.vertical(|ui| {
-                            ui.strong(title);
-                            ui.label(RichText::new(&col.ty).small().weak());
-                        })
-                        .response
-                        .on_hover_text(tooltip);
-                    });
-                }
-                if has_pk {
-                    header.col(|_| {});
-                }
-            })
-            .body(|body| {
-                body.rows(22.0, row_count, |mut row| {
-                    let i = row.index();
-                    let selected = self
-                        .open_tables
-                        .get(&key)
-                        .map(|o| o.selected_row == Some(i))
-                        .unwrap_or(false);
-                    row.set_selected(selected);
-                    if let Some(open) = self.open_tables.get(&key) {
-                        if let Some(cells) = open.rows.get(i) {
-                            for cell in cells {
-                                row.col(|ui| match cell {
-                                    Some(value) => {
-                                        ui.label(RichText::new(value));
-                                    }
-                                    None => {
-                                        ui.label(RichText::new("NULL").weak().italics());
-                                    }
-                                });
-                            }
-                        }
-                    }
-                    if has_pk {
-                        row.col(|ui| {
-                            ui.horizontal(|ui| {
-                                if ui.small_button("Edit").clicked() {
-                                    row_action = Some((i, RecordAction::Edit));
-                                }
-                                let armed = self
-                                    .delete_arm
-                                    .as_ref()
-                                    .map(|(k, r)| k == &key && *r == i)
-                                    .unwrap_or(false);
-                                let label = if armed { "Delete?" } else { "Delete" };
-                                if ui.small_button(label).clicked() {
-                                    row_action = Some((i, RecordAction::Delete));
-                                }
-                            });
-                        });
-                    }
-                    if row.response().double_clicked() && has_pk {
-                        double_clicked = Some(i);
-                    } else if row.response().clicked() {
-                        clicked = Some(i);
-                    }
-                });
-            });
-        if let Some(i) = clicked {
-            self.select_table_row(&key, i);
-            self.view = View::Table;
-        }
-        if let Some(i) = double_clicked {
-            self.open_record_panel(&key, RecordPanelMode::Edit, Some(i));
-        }
-        if let Some((i, action)) = row_action {
-            match action {
-                RecordAction::Edit => {
-                    self.open_record_panel(&key, RecordPanelMode::Edit, Some(i));
-                }
-                RecordAction::Delete => {
-                    let armed = self
-                        .delete_arm
-                        .as_ref()
-                        .map(|(k, r)| k == &key && *r == i)
-                        .unwrap_or(false);
-                    if armed {
-                        self.delete_confirm(&key, i);
-                    } else {
-                        self.delete_arm = Some((key.clone(), i));
-                    }
-                }
-            }
-        } else if ctx.input(|i| i.pointer.any_click()) {
-            // Clicking anywhere else disarms the two-step delete.
-            if let Some((k, _)) = &self.delete_arm {
-                if k == &key {
-                    self.delete_arm = None;
-                }
+        if let Some(path) = dialog.save_file() {
+            match std::fs::write(&path, body) {
+                Ok(_) => self.push_log(format!(
+                    "exported {} bytes to {}",
+                    path.display(),
+                    std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+                )),
+                Err(e) => self.push_log(format!("export failed: {e}")),
             }
         }
     }
 
-    /// Open the add/edit side panel for a table (row = `None` for a new one).
+    /// Open the add/edit record side panel for a table (row = `None` for new).
     fn open_record_panel(&mut self, key: &TableKey, mode: RecordPanelMode, row: Option<usize>) {
         let Some(open) = self.open_tables.get(key) else {
             return;
@@ -1250,7 +741,7 @@ impl TermdbApp {
         });
     }
 
-    /// The sliding record panel, tup-db-client style.
+    /// The right-side record panel window (add/edit a row).
     fn ui_record_panel(&mut self, ctx: &egui::Context) {
         let Some(mut panel) = self.record_panel.take() else {
             return;
@@ -1266,83 +757,136 @@ impl TermdbApp {
         };
         let mut fields = std::mem::take(&mut panel.fields);
         let mut save = false;
-        let mut cancel = false;
-        let mut open_flag = true;
+        let mut close = false;
 
-        egui::Window::new(title)
-            .open(&mut open_flag)
-            .anchor(egui::Align2::RIGHT_CENTER, [-8.0, 0.0])
-            .default_width(420.0)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    egui::Grid::new("record_panel_fields")
-                        .num_columns(2)
-                        .spacing([12.0, 8.0])
-                        .show(ui, |ui| {
-                            for (i, col) in columns.iter().enumerate() {
-                                ui.vertical(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(&col.name);
-                                        if col.key == "PRI" {
-                                            ui.label(badge("PK", BADGE_PK));
-                                        }
-                                        if auto_increment_col(col) {
-                                            ui.label(badge("AI", BADGE_AI));
-                                        }
-                                        if !col.nullable {
-                                            ui.label(RichText::new("*").color(BADGE_REQUIRED));
-                                        }
-                                    });
-                                });
-                                let disabled = auto_increment_col(col);
-                                let Some(field) = fields.get_mut(i) else {
-                                    ui.end_row();
-                                    continue;
-                                };
-                                if is_bool_col(col) {
-                                    let mut value = field != "false" && !field.is_empty();
-                                    let resp = ui.add_enabled(
-                                        !disabled,
-                                        egui::Checkbox::without_text(&mut value),
-                                    );
-                                    if resp.changed() {
-                                        *field = value.to_string();
-                                    }
-                                } else if is_complex_col(col) {
-                                    ui.add_enabled(
-                                        !disabled,
-                                        egui::TextEdit::multiline(field).desired_rows(4),
-                                    );
-                                } else {
-                                    ui.add_enabled(
-                                        !disabled,
-                                        egui::TextEdit::singleline(field).desired_width(240.0),
-                                    );
-                                }
-                                ui.end_row();
+        let modal = egui::Modal::new(egui::Id::new("termdb_record_panel_modal")).show(ctx, |ui| {
+            egui::Frame::default()
+                .fill(crate::theme::CARD)
+                .stroke(egui::Stroke::new(1.0, crate::theme::BORDER_STRONG))
+                .corner_radius(0)
+                .inner_margin(egui::Margin::symmetric(16, 12))
+                .show(ui, |ui| {
+                    ui.set_min_width(400.0);
+                    ui.horizontal(|ui| {
+                        ui.heading(RichText::new(title).monospace());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new("×")
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::NONE),
+                                )
+                                .on_hover_text("Close")
+                                .clicked()
+                            {
+                                close = true;
                             }
                         });
-                });
-                ui.add_space(6.0);
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Save").clicked() {
-                            save = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            cancel = true;
-                        }
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(420.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            egui::Grid::new("record_panel_fields")
+                                .num_columns(2)
+                                .spacing([12.0, 8.0])
+                                .show(ui, |ui| {
+                                    for (i, col) in columns.iter().enumerate() {
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(&col.name);
+                                                if col.key == "PRI" {
+                                                    ui.label(
+                                                        RichText::new("PK")
+                                                            .small()
+                                                            .color(crate::theme::AMBER),
+                                                    );
+                                                }
+                                                if auto_increment_col(col) {
+                                                    ui.label(
+                                                        RichText::new("AI")
+                                                            .small()
+                                                            .color(crate::theme::GREEN),
+                                                    );
+                                                }
+                                                if !col.nullable {
+                                                    ui.label(
+                                                        RichText::new("*")
+                                                            .small()
+                                                            .color(crate::theme::RED),
+                                                    );
+                                                }
+                                            });
+                                        });
+                                        let disabled = auto_increment_col(col);
+                                        let Some(field) = fields.get_mut(i) else {
+                                            ui.end_row();
+                                            continue;
+                                        };
+                                        if is_bool_col(col) {
+                                            let mut value = field != "false" && !field.is_empty();
+                                            let resp = ui.add_enabled(
+                                                !disabled,
+                                                egui::Checkbox::without_text(&mut value),
+                                            );
+                                            if resp.changed() {
+                                                *field = value.to_string();
+                                            }
+                                        } else if is_complex_col(col) {
+                                            ui.add_enabled(
+                                                !disabled,
+                                                egui::TextEdit::multiline(field).desired_rows(4),
+                                            );
+                                        } else {
+                                            ui.add_enabled(
+                                                !disabled,
+                                                egui::TextEdit::singleline(field)
+                                                    .desired_width(240.0),
+                                            );
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Save").strong().color(egui::Color32::WHITE),
+                                    )
+                                    .fill(crate::theme::BLUE)
+                                    .stroke(egui::Stroke::new(1.0, crate::theme::BLUE_DARK)),
+                                )
+                                .clicked()
+                            {
+                                save = true;
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new("Cancel")
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::new(
+                                            1.0,
+                                            crate::theme::BORDER_STRONG,
+                                        )),
+                                )
+                                .clicked()
+                            {
+                                close = true;
+                            }
+                        });
                     });
                 });
-            });
+        });
 
-        if cancel {
-            open_flag = false;
+        if modal.should_close() {
+            close = true;
         }
-        if open_flag {
+        if !close {
             panel.fields = fields;
             if save {
                 self.submit_record_panel(&panel);
@@ -1399,21 +943,113 @@ impl TermdbApp {
         }
     }
 
-    fn delete_confirm(&mut self, key: &TableKey, row: usize) {
-        self.delete_arm = None;
-        let (conn_id, database, table) = key.clone();
-        let Some(open) = self.open_tables.get(key) else {
+    /// Ask for confirmation before a destructive row delete.
+    fn request_delete_row(&mut self, key: &TableKey, row: usize) {
+        let (_, db, table) = key;
+        self.confirm = Some(ConfirmDialog {
+            title: "Delete row?".to_owned(),
+            message: format!("Permanently delete this row from \"{db}.{table}\"?"),
+            action: ConfirmAction::DeleteRow {
+                key: key.clone(),
+                row,
+            },
+        });
+    }
+
+    /// Ask for confirmation before removing a saved connection.
+    fn request_delete_connection(&mut self, conn_id: i64, name: &str) {
+        self.confirm = Some(ConfirmDialog {
+            title: "Remove connection?".to_owned(),
+            message: format!(
+                "Permanently remove \"{name}\" and the saved password from the vault?"
+            ),
+            action: ConfirmAction::DeleteConnection { conn_id },
+        });
+    }
+
+    /// Center-modal confirming the pending destructive action.
+    fn ui_confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.confirm.take() else {
             return;
         };
-        let columns = open.columns.clone();
-        if let Some(pk) = record_pk(open, row) {
-            self.backend.send(Request::DeleteRow {
-                conn_id,
-                database,
-                table,
-                columns,
-                pk,
-            });
+        let mut confirmed = false;
+        let mut closed = false;
+
+        let modal = egui::Modal::new(egui::Id::new("termdb_confirm_modal")).show(ctx, |ui| {
+            egui::Frame::default()
+                .fill(crate::theme::CARD)
+                .stroke(egui::Stroke::new(1.0, crate::theme::BORDER_STRONG))
+                .corner_radius(0)
+                .inner_margin(egui::Margin::symmetric(16, 12))
+                .show(ui, |ui| {
+                    ui.set_min_width(360.0);
+                    ui.heading(RichText::new(&dialog.title).monospace());
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(&dialog.message).color(crate::theme::TEXT_DIM));
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Delete")
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(crate::theme::RED)
+                                    .stroke(egui::Stroke::new(1.0, crate::theme::RED_DARK)),
+                                )
+                                .clicked()
+                            {
+                                confirmed = true;
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new("Cancel")
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::new(
+                                            1.0,
+                                            crate::theme::BORDER_STRONG,
+                                        )),
+                                )
+                                .clicked()
+                            {
+                                closed = true;
+                            }
+                        });
+                    });
+                });
+        });
+
+        if modal.should_close() {
+            closed = true;
+        }
+        if confirmed {
+            match dialog.action {
+                ConfirmAction::DeleteRow { key, row } => {
+                    let (conn_id, database, table) = key.clone();
+                    let Some(open) = self.open_tables.get(&key) else {
+                        return;
+                    };
+                    let columns = open.columns.clone();
+                    if let Some(pk) = record_pk(open, row) {
+                        self.backend.send(Request::DeleteRow {
+                            conn_id,
+                            database,
+                            table,
+                            columns,
+                            pk,
+                        });
+                        self.push_log("deleting row…".into());
+                    }
+                }
+                ConfirmAction::DeleteConnection { conn_id } => {
+                    self.backend.send(Request::DeleteConnection { conn_id });
+                    self.push_log(format!("deleting connection #{conn_id}…"));
+                }
+            }
+        } else if !closed {
+            self.confirm = Some(dialog);
         }
     }
 
@@ -1466,87 +1102,8 @@ impl TermdbApp {
             offset: page * page_size,
         });
     }
-
-    fn ui_history(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("History")
-            .default_open(false)
-            .show(ui, |ui| {
-                if self.history.is_empty() {
-                    ui.label(RichText::new("no queries yet").weak());
-                }
-                let mut clicked_sql: Option<String> = None;
-                for entry in &self.history {
-                    if ui
-                        .selectable_label(false, short(&entry.sql))
-                        .on_hover_text(&entry.sql)
-                        .clicked()
-                    {
-                        clicked_sql = Some(entry.sql.clone());
-                    }
-                }
-                if let Some(sql) = clicked_sql {
-                    self.query_text = sql.clone();
-                    self.view = View::Query;
-                    self.run_query();
-                }
-                if !self.history.is_empty() && ui.small_button("Clear").clicked() {
-                    self.backend.send(Request::ClearHistory {});
-                }
-            });
-    }
-
-    fn export(&mut self, columns: &[String], rows: &[Vec<Option<String>>], format: &str) {
-        let body = match format {
-            "csv" => termdb::export::to_csv(columns, rows),
-            "json" => termdb::export::to_json(columns, rows),
-            _ => return,
-        };
-        let extension = format;
-        let mut dialog = rfd::FileDialog::new().set_file_name(format!("export.{extension}"));
-        if format == "csv" {
-            dialog = dialog.add_filter("CSV", &["csv"]);
-        } else {
-            dialog = dialog.add_filter("JSON", &["json"]);
-        }
-        if let Some(path) = dialog.save_file() {
-            match std::fs::write(&path, body) {
-                Ok(_) => self.push_log(format!(
-                    "exported {} bytes to {}",
-                    path.display(),
-                    std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
-                )),
-                Err(e) => self.push_log(format!("export failed: {e}")),
-            }
-        }
-    }
-
-    fn ui_log(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("Log");
-            if ui.small_button("Clear").clicked() {
-                self.log.clear();
-            }
-        });
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                for line in &self.log {
-                    ui.monospace(line);
-                }
-            });
-    }
 }
 
-fn total_pages(total: i64, page_size: i64) -> i64 {
-    if total <= 0 {
-        1
-    } else {
-        (total + page_size - 1) / page_size
-    }
-}
-
-/// Truncate a query for one-line log/history display.
 fn short(sql: &str) -> String {
     let one_line = sql.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.chars().count() > 48 {
@@ -1557,196 +1114,12 @@ fn short(sql: &str) -> String {
     }
 }
 
-/// Read-only virtualized grid for ad-hoc query results (headers are plain
-/// strings; no row selection).
-fn ui_result_grid(ui: &mut egui::Ui, columns: &[String], rows: &[Vec<Option<String>>]) {
-    let mut table = TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::LEFT))
-        .column(TableColumn::auto());
-    for _ in columns.iter().skip(1) {
-        table = table.column(TableColumn::auto());
+fn total_pages(total: i64, page_size: i64) -> i64 {
+    if total <= 0 {
+        1
+    } else {
+        (total + page_size - 1) / page_size
     }
-    table
-        .header(24.0, |mut header| {
-            for name in columns {
-                header.col(|ui| {
-                    ui.strong(name);
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(20.0, rows.len(), |mut row| {
-                let i = row.index();
-                if let Some(cells) = rows.get(i) {
-                    for cell in cells {
-                        row.col(|ui| match cell {
-                            Some(value) => {
-                                ui.label(RichText::new(value));
-                            }
-                            None => {
-                                ui.label(RichText::new("NULL").weak().italics());
-                            }
-                        });
-                    }
-                }
-            });
-        });
-}
-
-/// Extremely small SQL token-highlighter used as the editor layouter.
-const SQL_KEYWORDS: &[&str] = &[
-    "SELECT",
-    "FROM",
-    "WHERE",
-    "AND",
-    "OR",
-    "NOT",
-    "INSERT",
-    "INTO",
-    "VALUES",
-    "UPDATE",
-    "SET",
-    "DELETE",
-    "LIMIT",
-    "OFFSET",
-    "ORDER",
-    "BY",
-    "GROUP",
-    "HAVING",
-    "JOIN",
-    "LEFT",
-    "RIGHT",
-    "INNER",
-    "OUTER",
-    "FULL",
-    "CROSS",
-    "AS",
-    "ON",
-    "NULL",
-    "TRUE",
-    "FALSE",
-    "LIKE",
-    "ILIKE",
-    "IS",
-    "IN",
-    "EXISTS",
-    "CASE",
-    "WHEN",
-    "THEN",
-    "ELSE",
-    "END",
-    "CREATE",
-    "TABLE",
-    "DROP",
-    "ALTER",
-    "PRIMARY",
-    "KEY",
-    "REFERENCES",
-    "DISTINCT",
-];
-
-fn sql_layouter(ui: &egui::Ui, buffer: &dyn TextBuffer, wrap_width: f32) -> Arc<Galley> {
-    use egui::text::{LayoutJob, TextFormat};
-    use egui::Color32;
-
-    const KEYWORD: Color32 = Color32::from_rgb(0x7d, 0xc9, 0xff);
-    const STRING: Color32 = Color32::from_rgb(0x6f, 0xa8, 0x5f);
-    const NUMBER: Color32 = Color32::from_rgb(0xd1, 0x9a, 0x66);
-    const COMMENT: Color32 = Color32::from_rgb(0x6b, 0x74, 0x80);
-    const DEFAULT: Color32 = Color32::from_rgb(0xc9, 0xd1, 0xd9);
-
-    let font_id = FontId::monospace(13.0);
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = wrap_width;
-
-    let is_keyword = |w: &str| {
-        SQL_KEYWORDS
-            .iter()
-            .any(|k| k.eq_ignore_ascii_case(w.trim()))
-    };
-    let is_number = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit() || c == '.');
-
-    let chars: Vec<char> = buffer.as_str().chars().collect();
-    let mut i = 0;
-    let mut word = String::new();
-    let mut push = |text: &str, color: Color32| {
-        if text.is_empty() {
-            return;
-        }
-        job.append(
-            text,
-            0.0,
-            TextFormat {
-                font_id: font_id.clone(),
-                color,
-                ..Default::default()
-            },
-        );
-    };
-    macro_rules! flush_word {
-        () => {
-            if !word.is_empty() {
-                let color = if is_keyword(&word) {
-                    KEYWORD
-                } else if is_number(&word) {
-                    NUMBER
-                } else {
-                    DEFAULT
-                };
-                push(&word.clone(), color);
-                word.clear();
-            }
-        };
-    }
-
-    while i < chars.len() {
-        let c = chars[i];
-        match c {
-            '\'' => {
-                flush_word!();
-                let mut lit = String::from("'");
-                i += 1;
-                while i < chars.len() {
-                    if chars[i] == '\'' {
-                        if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                            lit.push_str("''");
-                            i += 2;
-                            continue;
-                        }
-                        lit.push('\'');
-                        i += 1;
-                        break;
-                    }
-                    lit.push(chars[i]);
-                    i += 1;
-                }
-                push(&lit, STRING);
-            }
-            '-' if i + 1 < chars.len() && chars[i + 1] == '-' => {
-                flush_word!();
-                let mut comment = String::new();
-                while i < chars.len() && chars[i] != '\n' {
-                    comment.push(chars[i]);
-                    i += 1;
-                }
-                push(&comment, COMMENT);
-            }
-            c if c.is_whitespace() || matches!(c, '(' | ')' | ',' | ';') => {
-                flush_word!();
-                push(&c.to_string(), DEFAULT);
-                i += 1;
-            }
-            _ => {
-                word.push(c);
-                i += 1;
-            }
-        }
-    }
-    flush_word!();
-
-    ui.ctx().fonts_mut(|f| f.layout_job(job))
 }
 
 impl eframe::App for TermdbApp {
@@ -1759,35 +1132,25 @@ impl eframe::App for TermdbApp {
 
         self.drain_events();
 
-        egui::Panel::bottom("status_bar").show(ui, |ui| {
-            self.ui_status_bar(ui);
-        });
+        // Top header bar, fixed-width sidebar, then the workspace cards.
+        ui::header::ui_header_bar(self, ui);
+        ui::sidebar::ui_sidebar(self, ui);
 
-        egui::Panel::left("sidebar")
-            .resizable(true)
-            .default_size(320.0)
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::default()
+                    .fill(crate::theme::BG)
+                    .inner_margin(egui::Margin::symmetric(12, 12)),
+            )
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.add_space(4.0);
-                    self.ui_connections(ui);
-                    ui.add_space(12.0);
-                    self.ui_new_connection(ui);
-                    ui.add_space(12.0);
-                    self.ui_history(ui);
-                });
+                workspace(self, ui);
             });
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            if self.view == View::Query {
-                self.ui_query_workspace(ui);
-            } else {
-                self.ui_central(ui);
-            }
-            ui.separator();
-            self.ui_log(ui);
-        });
-
-        // Floating record panel (drawn last so it sits above everything).
+        // Floating overlays (drawn last so they sit above everything).
+        header::ui_settings_window(self, &ctx);
+        header::ui_logs_window(self, &ctx);
+        sidebar::ui_new_connection_window(self, &ctx);
+        self.ui_confirm_dialog(&ctx);
         self.ui_record_panel(&ctx);
     }
 }
