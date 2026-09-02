@@ -36,15 +36,21 @@ pub(crate) fn ghost_button<'a>(text: &'a str) -> egui::Button<'a> {
         .stroke(Stroke::NONE)
 }
 
-/// Outlined tag pill ("MCP: Stopped", "is_active = true", …).
+/// Outlined tag pill ("MCP: Stopped", "+ Add Filter", active-filter chips).
 pub(crate) fn pill(ui: &mut Ui, text: &str, color: Color32) -> egui::Response {
     egui::Frame::default()
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
         .corner_radius(0)
         .inner_margin(egui::Margin::symmetric(8, 2))
-        .show(ui, |ui| ui.label(RichText::new(text).small().color(color)))
-        .response
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(text).small().color(color))
+                    .sense(egui::Sense::click()),
+            )
+        })
+        .inner
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Collapsible section header: `▾ TITLE` on the left, trailing widgets on the
