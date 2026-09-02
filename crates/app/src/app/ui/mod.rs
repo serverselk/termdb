@@ -36,6 +36,13 @@ pub(crate) fn ghost_button<'a>(text: &'a str) -> egui::Button<'a> {
         .stroke(Stroke::NONE)
 }
 
+/// Compact uniform icon button (equally sized glyphs for × / 🗑 and friends).
+pub(crate) fn icon_button(text: &str) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(text).size(14.0).color(theme::TEXT))
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::NONE)
+}
+
 /// Outlined tag pill ("MCP: Stopped", "+ Add Filter", active-filter chips).
 pub(crate) fn pill(ui: &mut Ui, text: &str, color: Color32) -> egui::Response {
     egui::Frame::default()

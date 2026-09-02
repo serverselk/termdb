@@ -96,6 +96,18 @@ enum RecordAction {
     Delete,
 }
 
+/// A pending destructive action awaiting confirmation.
+struct ConfirmDialog {
+    title: String,
+    message: String,
+    action: ConfirmAction,
+}
+
+enum ConfirmAction {
+    DeleteRow { key: TableKey, row: usize },
+    DeleteConnection { conn_id: i64 },
+}
+
 type TableKey = (i64, String, String);
 
 /// How far along backend startup / last round-trip we are.
@@ -260,8 +272,8 @@ pub struct TermdbApp {
     filter_open: bool,
     /// Add/Edit record side panel.
     record_panel: Option<RecordPanel>,
-    /// Armed delete-confirmation: `(table, row)` deleted on the second click.
-    delete_arm: Option<(TableKey, usize)>,
+    /// Pending destructive action awaiting confirmation.
+    confirm: Option<ConfirmDialog>,
     form: NewConnectionForm,
     saving: bool,
     backend_status: BackendStatus,
@@ -310,7 +322,7 @@ impl TermdbApp {
             filter_val: String::new(),
             filter_open: false,
             record_panel: None,
-            delete_arm: None,
+            confirm: None,
             form: NewConnectionForm::default(),
             saving: false,
             backend_status: BackendStatus::Starting,
@@ -406,9 +418,13 @@ impl TermdbApp {
                         self.record_panel = None;
                     }
                 }
-                if let Some((key, _)) = &self.delete_arm {
-                    if key.0 == conn_id {
-                        self.delete_arm = None;
+                if let Some(ConfirmDialog {
+                    action: ConfirmAction::DeleteConnection { conn_id: target },
+                    ..
+                }) = &self.confirm
+                {
+                    if *target == conn_id {
+                        self.confirm = None;
                     }
                 }
                 self.push_log(format!("disconnected \"{name}\""));
@@ -525,7 +541,6 @@ impl TermdbApp {
                 self.push_log("history cleared".into());
             }
             Event::RowChanged { conn_id } => {
-                self.delete_arm = None;
                 self.record_panel = None;
                 if let Some((c, _, _)) = &self.table_selection {
                     if *c == conn_id {
@@ -565,7 +580,7 @@ impl TermdbApp {
                         self.record_panel = None;
                     }
                 }
-                self.delete_arm = None;
+                self.confirm = None;
                 self.push_log(format!("deleted connection \"{name}\""));
             }
             Event::StoreFailed { message } => {
@@ -617,12 +632,6 @@ impl TermdbApp {
         self.selected_id = Some(conn_id);
         self.backend.send(Request::Connect { conn_id });
         self.push_log(format!("connecting to \"{}\"…", cfg.name));
-    }
-
-    /// Remove a connection (any state) from the config store + vault.
-    fn delete_connection(&mut self, conn_id: i64) {
-        self.backend.send(Request::DeleteConnection { conn_id });
-        self.push_log(format!("deleting connection #{conn_id}…"));
     }
 
     /// Toggle a table's favorite star.
@@ -934,21 +943,113 @@ impl TermdbApp {
         }
     }
 
-    fn delete_confirm(&mut self, key: &TableKey, row: usize) {
-        self.delete_arm = None;
-        let (conn_id, database, table) = key.clone();
-        let Some(open) = self.open_tables.get(key) else {
+    /// Ask for confirmation before a destructive row delete.
+    fn request_delete_row(&mut self, key: &TableKey, row: usize) {
+        let (_, db, table) = key;
+        self.confirm = Some(ConfirmDialog {
+            title: "Delete row?".to_owned(),
+            message: format!("Permanently delete this row from \"{db}.{table}\"?"),
+            action: ConfirmAction::DeleteRow {
+                key: key.clone(),
+                row,
+            },
+        });
+    }
+
+    /// Ask for confirmation before removing a saved connection.
+    fn request_delete_connection(&mut self, conn_id: i64, name: &str) {
+        self.confirm = Some(ConfirmDialog {
+            title: "Remove connection?".to_owned(),
+            message: format!(
+                "Permanently remove \"{name}\" and the saved password from the vault?"
+            ),
+            action: ConfirmAction::DeleteConnection { conn_id },
+        });
+    }
+
+    /// Center-modal confirming the pending destructive action.
+    fn ui_confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.confirm.take() else {
             return;
         };
-        let columns = open.columns.clone();
-        if let Some(pk) = record_pk(open, row) {
-            self.backend.send(Request::DeleteRow {
-                conn_id,
-                database,
-                table,
-                columns,
-                pk,
-            });
+        let mut confirmed = false;
+        let mut closed = false;
+
+        let modal = egui::Modal::new(egui::Id::new("termdb_confirm_modal")).show(ctx, |ui| {
+            egui::Frame::default()
+                .fill(crate::theme::CARD)
+                .stroke(egui::Stroke::new(1.0, crate::theme::BORDER_STRONG))
+                .corner_radius(0)
+                .inner_margin(egui::Margin::symmetric(16, 12))
+                .show(ui, |ui| {
+                    ui.set_min_width(360.0);
+                    ui.heading(RichText::new(&dialog.title).monospace());
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(&dialog.message).color(crate::theme::TEXT_DIM));
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Delete")
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(crate::theme::RED)
+                                    .stroke(egui::Stroke::new(1.0, crate::theme::RED_DARK)),
+                                )
+                                .clicked()
+                            {
+                                confirmed = true;
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new("Cancel")
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::new(
+                                            1.0,
+                                            crate::theme::BORDER_STRONG,
+                                        )),
+                                )
+                                .clicked()
+                            {
+                                closed = true;
+                            }
+                        });
+                    });
+                });
+        });
+
+        if modal.should_close() {
+            closed = true;
+        }
+        if confirmed {
+            match dialog.action {
+                ConfirmAction::DeleteRow { key, row } => {
+                    let (conn_id, database, table) = key.clone();
+                    let Some(open) = self.open_tables.get(&key) else {
+                        return;
+                    };
+                    let columns = open.columns.clone();
+                    if let Some(pk) = record_pk(open, row) {
+                        self.backend.send(Request::DeleteRow {
+                            conn_id,
+                            database,
+                            table,
+                            columns,
+                            pk,
+                        });
+                        self.push_log("deleting row…".into());
+                    }
+                }
+                ConfirmAction::DeleteConnection { conn_id } => {
+                    self.backend.send(Request::DeleteConnection { conn_id });
+                    self.push_log(format!("deleting connection #{conn_id}…"));
+                }
+            }
+        } else if !closed {
+            self.confirm = Some(dialog);
         }
     }
 
@@ -1049,6 +1150,7 @@ impl eframe::App for TermdbApp {
         header::ui_settings_window(self, &ctx);
         header::ui_logs_window(self, &ctx);
         sidebar::ui_new_connection_window(self, &ctx);
+        self.ui_confirm_dialog(&ctx);
         self.ui_record_panel(&ctx);
     }
 }

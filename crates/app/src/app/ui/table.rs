@@ -257,7 +257,6 @@ impl TermdbApp {
         let mut clicked: Option<usize> = None;
         let mut double_clicked: Option<usize> = None;
         let mut row_action: Option<(usize, RecordAction)> = None;
-        let ctx = ui.ctx().clone();
 
         let mut table = TableBuilder::new(ui)
             .striped(true)
@@ -335,20 +334,10 @@ impl TermdbApp {
                                 if ui.small_button("Edit").clicked() {
                                     row_action = Some((i, RecordAction::Edit));
                                 }
-                                let armed = self
-                                    .delete_arm
-                                    .as_ref()
-                                    .map(|(k, r)| k == key && *r == i)
-                                    .unwrap_or(false);
-                                let label = if armed { "Delete?" } else { "Delete" };
                                 if ui
                                     .add(
-                                        egui::Button::new(label)
-                                            .fill(if armed {
-                                                theme::RED_DARK
-                                            } else {
-                                                crate::theme::CARD
-                                            })
+                                        egui::Button::new("Delete")
+                                            .fill(crate::theme::CARD)
                                             .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG)),
                                     )
                                     .clicked()
@@ -376,22 +365,7 @@ impl TermdbApp {
             match action {
                 RecordAction::Edit => self.open_record_panel(key, RecordPanelMode::Edit, Some(i)),
                 RecordAction::Delete => {
-                    let armed = self
-                        .delete_arm
-                        .as_ref()
-                        .map(|(k, r)| k == key && *r == i)
-                        .unwrap_or(false);
-                    if armed {
-                        self.delete_confirm(key, i);
-                    } else {
-                        self.delete_arm = Some(((*key).clone(), i));
-                    }
-                }
-            }
-        } else if ctx.input(|i| i.pointer.any_click()) {
-            if let Some((k, _)) = &self.delete_arm {
-                if k == key {
-                    self.delete_arm = None;
+                    self.request_delete_row(key, i);
                 }
             }
         }

@@ -3,7 +3,7 @@
 
 use egui::RichText;
 
-use super::{ghost_button, primary_button, status_dot};
+use super::{ghost_button, icon_button, primary_button, status_dot};
 use crate::app::TermdbApp;
 use crate::theme;
 use termdb::db::Request;
@@ -94,14 +94,14 @@ impl TermdbApp {
                 }
                 if connected
                     && ui
-                        .add(ghost_button("×").small())
+                        .add(icon_button("×"))
                         .on_hover_text("Disconnect")
                         .clicked()
                 {
                     close = true;
                 }
                 if ui
-                    .add(ghost_button("🗑").small())
+                    .add(icon_button("🗑"))
                     .on_hover_text("Remove connection")
                     .clicked()
                 {
@@ -119,7 +119,7 @@ impl TermdbApp {
                 self.backend.send(Request::Disconnect { conn_id: id });
             }
             if delete {
-                self.delete_connection(id);
+                self.request_delete_connection(id, &name);
             }
         }
     }
