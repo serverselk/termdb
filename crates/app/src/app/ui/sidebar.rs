@@ -14,10 +14,33 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
         .resizable(false)
         .exact_size(264.0)
         .show(root, |ui| {
-            // Bottom dock: full-width red Disconnect.
+            // Scrollable connection + database lists (top).
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("CONNECTIONS")
+                            .small()
+                            .strong()
+                            .color(theme::TEXT_DIM),
+                    );
+                    app.ui_connection_list(ui);
+                    ui.add_space(16.0);
+                    ui.label(
+                        RichText::new("DATABASES")
+                            .small()
+                            .strong()
+                            .color(theme::TEXT_DIM),
+                    );
+                    app.ui_database_tree(ui);
+                    ui.add_space(8.0);
+                });
+
+            // Bottom dock: status + full-width red Disconnect.
+            ui.add_space(4.0);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(10.0);
-                ui.add_space(6.0);
                 egui::Frame::default()
                     .fill(theme::CARD)
                     .stroke(egui::Stroke::new(1.0, theme::GRID))
@@ -57,29 +80,6 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
                         }
                     });
             });
-
-            // Scrollable lists.
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new("CONNECTIONS")
-                            .small()
-                            .strong()
-                            .color(theme::TEXT_DIM),
-                    );
-                    app.ui_connection_list(ui);
-                    ui.add_space(16.0);
-                    ui.label(
-                        RichText::new("DATABASES")
-                            .small()
-                            .strong()
-                            .color(theme::TEXT_DIM),
-                    );
-                    app.ui_database_tree(ui);
-                    ui.add_space(8.0);
-                });
         });
 }
 

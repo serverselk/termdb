@@ -13,7 +13,7 @@ pub(crate) fn ui_header_bar(app: &mut TermdbApp, root: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.add_space(10.0);
                 ui.label(
-                    RichText::new("TUP-DB-CLIENT")
+                    RichText::new("TERMDB")
                         .monospace()
                         .strong()
                         .size(17.0)
