@@ -5,13 +5,13 @@ use egui::RichText;
 
 use super::{ghost_button, icon_button, pill, primary_button, status_dot};
 use crate::app::TermdbApp;
-use crate::theme;
 use termdb::db::Request;
 use termdb_core::Engine;
 
 type TableKey = crate::app::TableKey;
 
 pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
+    let pal = crate::theme::palette();
     egui::Panel::left("sidebar")
         .resizable(false)
         .exact_size(264.0)
@@ -25,7 +25,7 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
                         RichText::new("CONNECTIONS")
                             .small()
                             .strong()
-                            .color(theme::TEXT_DIM),
+                            .color(pal.text_dim),
                     );
                     app.ui_connection_list(ui);
                     ui.add_space(16.0);
@@ -39,7 +39,7 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
                         RichText::new("DATABASES")
                             .small()
                             .strong()
-                            .color(theme::TEXT_DIM),
+                            .color(pal.text_dim),
                     );
                     app.ui_database_tree(ui);
                     ui.add_space(8.0);
@@ -48,7 +48,7 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
             // Bottom dock: MCP server status.
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
-                pill(ui, "MCP: Stopped", theme::TEXT_DIM);
+                pill(ui, "MCP: Stopped", pal.text_dim);
                 ui.add_space(6.0);
             });
         });
@@ -57,16 +57,17 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
 impl TermdbApp {
     /// One row per saved connection: status light + name + close button.
     fn ui_connection_list(&mut self, ui: &mut egui::Ui) {
+        let pal = crate::theme::palette();
         if self.connections.is_empty() {
             ui.label(
                 RichText::new("no saved connections")
                     .small()
-                    .color(theme::TEXT_DIM),
+                    .color(pal.text_dim),
             );
             ui.label(
                 RichText::new("use \"+ NEW CONNECTION\" in the header")
                     .small()
-                    .color(theme::TEXT_DIM),
+                    .color(pal.text_dim),
             );
             return;
         }
@@ -85,11 +86,11 @@ impl TermdbApp {
             let mut delete = false;
             ui.horizontal(|ui| {
                 let color = if connecting {
-                    theme::AMBER
+                    pal.amber
                 } else if connected {
-                    theme::GREEN
+                    pal.green
                 } else {
-                    theme::BORDER_STRONG
+                    pal.border_strong
                 };
                 status_dot(ui, color);
                 let label = ui.selectable_label(selected, &name);
@@ -130,17 +131,18 @@ impl TermdbApp {
 
     /// Favorite (starred) tables, surfaced at the top of the sidebar.
     fn ui_favorites_section(&mut self, ui: &mut egui::Ui) {
+        let pal = crate::theme::palette();
         ui.label(
             RichText::new("FAVORITES")
                 .small()
                 .strong()
-                .color(theme::TEXT_DIM),
+                .color(pal.text_dim),
         );
         if self.favorites.is_empty() {
             ui.label(
                 RichText::new("no favourites — star a table below")
                     .small()
-                    .color(theme::TEXT_DIM),
+                    .color(pal.text_dim),
             );
             return;
         }
@@ -158,7 +160,11 @@ impl TermdbApp {
                     self.toggle_favorite(key);
                 }
                 if !live {
-                    ui.label(RichText::new("•").small().color(theme::TEXT_DIM));
+                    ui.label(
+                        RichText::new("•")
+                            .small()
+                            .color(crate::theme::palette().text_dim),
+                    );
                 }
             });
         }
@@ -171,7 +177,7 @@ impl TermdbApp {
             ui.label(
                 RichText::new("connect to a server to browse databases")
                     .small()
-                    .color(theme::TEXT_DIM),
+                    .color(crate::theme::palette().text_dim),
             );
             return;
         }
@@ -226,12 +232,16 @@ impl TermdbApp {
                                     });
                                 }
                             } else if loading {
-                                ui.label(RichText::new("loading…").small().color(theme::TEXT_DIM));
+                                ui.label(
+                                    RichText::new("loading…")
+                                        .small()
+                                        .color(crate::theme::palette().text_dim),
+                                );
                             } else {
                                 ui.label(
                                     RichText::new("click to load")
                                         .small()
-                                        .color(theme::TEXT_DIM),
+                                        .color(crate::theme::palette().text_dim),
                                 );
                             }
                         });
@@ -322,7 +332,7 @@ pub(crate) fn ui_new_connection_window(app: &mut TermdbApp, ctx: &egui::Context)
                 });
 
             if let Some(problem) = app.form.first_problem() {
-                ui.label(RichText::new(problem).color(theme::RED));
+                ui.label(RichText::new(problem).color(crate::theme::palette().red));
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {

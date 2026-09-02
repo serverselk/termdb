@@ -274,6 +274,8 @@ pub struct TermdbApp {
     record_panel: Option<RecordPanel>,
     /// Pending destructive action awaiting confirmation.
     confirm: Option<ConfirmDialog>,
+    /// Live Omarchy theme follower (no-op off Linux / without Omarchy).
+    theme_watcher: crate::theme::ThemeWatcher,
     form: NewConnectionForm,
     saving: bool,
     backend_status: BackendStatus,
@@ -323,6 +325,7 @@ impl TermdbApp {
             filter_open: false,
             record_panel: None,
             confirm: None,
+            theme_watcher: crate::theme::ThemeWatcher::new(),
             form: NewConnectionForm::default(),
             saving: false,
             backend_status: BackendStatus::Starting,
@@ -758,11 +761,12 @@ impl TermdbApp {
         let mut fields = std::mem::take(&mut panel.fields);
         let mut save = false;
         let mut close = false;
+        let pal = crate::theme::palette();
 
         let modal = egui::Modal::new(egui::Id::new("termdb_record_panel_modal")).show(ctx, |ui| {
             egui::Frame::default()
-                .fill(crate::theme::CARD)
-                .stroke(egui::Stroke::new(1.0, crate::theme::BORDER_STRONG))
+                .fill(pal.card)
+                .stroke(egui::Stroke::new(1.0, pal.border_strong))
                 .corner_radius(0)
                 .inner_margin(egui::Margin::symmetric(16, 12))
                 .show(ui, |ui| {
@@ -800,21 +804,19 @@ impl TermdbApp {
                                                     ui.label(
                                                         RichText::new("PK")
                                                             .small()
-                                                            .color(crate::theme::AMBER),
+                                                            .color(pal.amber),
                                                     );
                                                 }
                                                 if auto_increment_col(col) {
                                                     ui.label(
                                                         RichText::new("AI")
                                                             .small()
-                                                            .color(crate::theme::GREEN),
+                                                            .color(pal.green),
                                                     );
                                                 }
                                                 if !col.nullable {
                                                     ui.label(
-                                                        RichText::new("*")
-                                                            .small()
-                                                            .color(crate::theme::RED),
+                                                        RichText::new("*").small().color(pal.red),
                                                     );
                                                 }
                                             });
@@ -858,8 +860,8 @@ impl TermdbApp {
                                     egui::Button::new(
                                         RichText::new("Save").strong().color(egui::Color32::WHITE),
                                     )
-                                    .fill(crate::theme::BLUE)
-                                    .stroke(egui::Stroke::new(1.0, crate::theme::BLUE_DARK)),
+                                    .fill(pal.blue)
+                                    .stroke(egui::Stroke::new(1.0, pal.blue_dark)),
                                 )
                                 .clicked()
                             {
@@ -869,10 +871,7 @@ impl TermdbApp {
                                 .add(
                                     egui::Button::new("Cancel")
                                         .fill(egui::Color32::TRANSPARENT)
-                                        .stroke(egui::Stroke::new(
-                                            1.0,
-                                            crate::theme::BORDER_STRONG,
-                                        )),
+                                        .stroke(egui::Stroke::new(1.0, pal.border_strong)),
                                 )
                                 .clicked()
                             {
@@ -974,18 +973,19 @@ impl TermdbApp {
         };
         let mut confirmed = false;
         let mut closed = false;
+        let pal = crate::theme::palette();
 
         let modal = egui::Modal::new(egui::Id::new("termdb_confirm_modal")).show(ctx, |ui| {
             egui::Frame::default()
-                .fill(crate::theme::CARD)
-                .stroke(egui::Stroke::new(1.0, crate::theme::BORDER_STRONG))
+                .fill(pal.card)
+                .stroke(egui::Stroke::new(1.0, pal.border_strong))
                 .corner_radius(0)
                 .inner_margin(egui::Margin::symmetric(16, 12))
                 .show(ui, |ui| {
                     ui.set_min_width(360.0);
                     ui.heading(RichText::new(&dialog.title).monospace());
                     ui.add_space(4.0);
-                    ui.label(RichText::new(&dialog.message).color(crate::theme::TEXT_DIM));
+                    ui.label(RichText::new(&dialog.message).color(pal.text_dim));
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -996,8 +996,8 @@ impl TermdbApp {
                                             .strong()
                                             .color(egui::Color32::WHITE),
                                     )
-                                    .fill(crate::theme::RED)
-                                    .stroke(egui::Stroke::new(1.0, crate::theme::RED_DARK)),
+                                    .fill(pal.red)
+                                    .stroke(egui::Stroke::new(1.0, pal.red_dark)),
                                 )
                                 .clicked()
                             {
@@ -1007,10 +1007,7 @@ impl TermdbApp {
                                 .add(
                                     egui::Button::new("Cancel")
                                         .fill(egui::Color32::TRANSPARENT)
-                                        .stroke(egui::Stroke::new(
-                                            1.0,
-                                            crate::theme::BORDER_STRONG,
-                                        )),
+                                        .stroke(egui::Stroke::new(1.0, pal.border_strong)),
                                 )
                                 .clicked()
                             {
@@ -1132,6 +1129,9 @@ impl eframe::App for TermdbApp {
 
         self.drain_events();
 
+        // Follow the Omarchy theme (cheap; no-ops off Linux without Omarchy).
+        self.theme_watcher.refresh(&ctx);
+
         // Top header bar, fixed-width sidebar, then the workspace cards.
         ui::header::ui_header_bar(self, ui);
         ui::sidebar::ui_sidebar(self, ui);
@@ -1139,7 +1139,7 @@ impl eframe::App for TermdbApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::default()
-                    .fill(crate::theme::BG)
+                    .fill(crate::theme::palette().bg)
                     .inner_margin(egui::Margin::symmetric(12, 12)),
             )
             .show(ui, |ui| {

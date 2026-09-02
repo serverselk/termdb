@@ -7,7 +7,6 @@ pub(crate) mod sidebar;
 pub(crate) mod table;
 
 use crate::app::TermdbApp;
-use crate::theme;
 use egui::{Color32, RichText, Stroke, Ui};
 
 /// Fixed heights for the virtualized grids inside the scrolling workspace, so
@@ -17,37 +16,42 @@ pub(crate) const RESULTS_GRID_HEIGHT: f32 = 260.0;
 
 /// Blue primary action button ("+ NEW CONNECTION", "▶ RUN", "Save", "+ Add").
 pub(crate) fn primary_button<'a>(text: &'a str) -> egui::Button<'a> {
+    let p = crate::theme::palette();
     egui::Button::new(RichText::new(text).color(Color32::WHITE).strong())
-        .fill(theme::BLUE)
-        .stroke(Stroke::new(1.0, theme::BLUE_DARK))
+        .fill(p.blue)
+        .stroke(Stroke::new(1.0, p.blue_dark))
 }
 
 /// Outline/ghost button ("MCP: Stopped" style tags, secondary actions).
 pub(crate) fn outline_button<'a>(text: &'a str) -> egui::Button<'a> {
-    egui::Button::new(RichText::new(text).color(theme::TEXT_DIM))
+    let p = crate::theme::palette();
+    egui::Button::new(RichText::new(text).color(p.text_dim))
         .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
+        .stroke(Stroke::new(1.0, p.border_strong))
 }
 
 /// Borderless text button, mostly for inline chips.
 pub(crate) fn ghost_button<'a>(text: &'a str) -> egui::Button<'a> {
-    egui::Button::new(RichText::new(text).color(theme::TEXT))
+    let p = crate::theme::palette();
+    egui::Button::new(RichText::new(text).color(p.text))
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::NONE)
 }
 
 /// Compact uniform icon button (equally sized glyphs for × / 🗑 and friends).
 pub(crate) fn icon_button(text: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(text).size(14.0).color(theme::TEXT))
+    let p = crate::theme::palette();
+    egui::Button::new(RichText::new(text).size(14.0).color(p.text))
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::NONE)
 }
 
 /// Outlined tag pill ("MCP: Stopped", "+ Add Filter", active-filter chips).
 pub(crate) fn pill(ui: &mut Ui, text: &str, color: Color32) -> egui::Response {
+    let p = crate::theme::palette();
     egui::Frame::default()
         .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
+        .stroke(Stroke::new(1.0, p.border_strong))
         .corner_radius(0)
         .inner_margin(egui::Margin::symmetric(8, 2))
         .show(ui, |ui| {
@@ -83,11 +87,12 @@ pub(crate) fn section_header(
     });
 }
 
-/// A framed card panel (navy card fill, hairline grid border).
+/// A framed card panel (card fill, hairline border).
 pub(crate) fn card(ui: &mut Ui, body: impl FnOnce(&mut Ui)) {
+    let p = crate::theme::palette();
     egui::Frame::default()
-        .fill(theme::CARD)
-        .stroke(Stroke::new(1.0, theme::GRID))
+        .fill(p.card)
+        .stroke(Stroke::new(1.0, p.grid))
         .corner_radius(0)
         .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, body);
