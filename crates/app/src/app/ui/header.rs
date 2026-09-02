@@ -2,7 +2,7 @@
 
 use egui::RichText;
 
-use super::{outline_button, pill, primary_button};
+use super::{icon_button, outline_button, primary_button};
 use crate::app::{BackendStatus, TermdbApp};
 use crate::theme;
 
@@ -21,9 +21,6 @@ pub(crate) fn ui_header_bar(app: &mut TermdbApp, root: &mut egui::Ui) {
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    pill(ui, "MCP: Stopped", theme::TEXT_DIM);
-                    ui.add_space(12.0);
-
                     if ui.add(primary_button("+ NEW CONNECTION")).clicked() {
                         app.show_new_connection = true;
                     }
@@ -31,11 +28,7 @@ pub(crate) fn ui_header_bar(app: &mut TermdbApp, root: &mut egui::Ui) {
 
                     let gear = "⚙";
                     if ui
-                        .add(
-                            egui::Button::new(RichText::new(gear).size(14.0))
-                                .fill(theme::CARD)
-                                .stroke(egui::Stroke::new(1.0, theme::BORDER)),
-                        )
+                        .add(icon_button(gear))
                         .on_hover_text("Settings")
                         .clicked()
                     {

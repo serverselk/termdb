@@ -3,7 +3,7 @@
 
 use egui::RichText;
 
-use super::{ghost_button, icon_button, primary_button, status_dot};
+use super::{ghost_button, icon_button, pill, primary_button, status_dot};
 use crate::app::TermdbApp;
 use crate::theme;
 use termdb::db::Request;
@@ -45,8 +45,12 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
                     ui.add_space(8.0);
                 });
 
-            // Bottom dock removed — per-connection actions live on each row (× for
-            // disconnect, 🗑 for delete). The sidebar now simply scrolls.
+            // Bottom dock: MCP server status.
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                pill(ui, "MCP: Stopped", theme::TEXT_DIM);
+                ui.add_space(6.0);
+            });
         });
 }
 

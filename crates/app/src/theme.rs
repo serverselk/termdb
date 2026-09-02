@@ -8,7 +8,6 @@ pub const CARD: Color32 = Color32::from_rgb(0x17, 0x1d, 0x27);
 pub const RAISED: Color32 = Color32::from_rgb(0x1d, 0x25, 0x30);
 pub const HOVER: Color32 = Color32::from_rgb(0x24, 0x2e, 0x3d);
 pub const GRID: Color32 = Color32::from_rgb(0x28, 0x31, 0x41);
-pub const BORDER: Color32 = Color32::from_rgb(0x2e, 0x3a, 0x47);
 pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x3b, 0x47, 0x59);
 pub const TEXT: Color32 = Color32::from_rgb(0xd7, 0xde, 0xe8);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(0x82, 0x93, 0xa8);
