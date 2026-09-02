@@ -84,6 +84,8 @@ pub enum Request {
         columns: Vec<Column>,
         pk: (String, Option<String>),
     },
+    /// Remove a saved connection: config row + vault entry (+ close live pool).
+    DeleteConnection { conn_id: i64 },
 }
 
 /// Events travelling backend -> UI.
@@ -176,6 +178,8 @@ pub enum Event {
     RowChanged { conn_id: i64 },
     /// A row mutation failed.
     MutationFailed { message: String },
+    /// A saved connection was removed from the config store + vault.
+    ConnectionDeleted { conn_id: i64, name: String },
     /// Any persistence/backend error, surfaced as a log line.
     StoreFailed { message: String },
 }
@@ -626,6 +630,42 @@ async fn worker_loop(req_rx: mpsc::Receiver<Request>, ev_tx: mpsc::Sender<Event>
                     None => {
                         let _ = ev_tx.send(Event::MutationFailed {
                             message: "not connected".into(),
+                        });
+                    }
+                }
+            }
+            Request::DeleteConnection { conn_id } => {
+                // Drop any live session, then remove the config row + vault entry.
+                if let Some(session) = sessions.remove(&conn_id) {
+                    session.disconnect().await;
+                }
+                let config_dir = config_dir.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let store = ConfigStore::open(&ConfigStore::default_path())
+                        .map_err(|e| e.to_string())?;
+                    let existing = store.get_connection(conn_id).map_err(|e| e.to_string())?;
+                    store
+                        .delete_connection(conn_id)
+                        .map_err(|e| e.to_string())?;
+                    if let Some(cfg) = &existing {
+                        let vault = Vault::new(&config_dir);
+                        vault.delete(&cfg.name).map_err(|e| e.to_string())?;
+                    }
+                    Ok(existing
+                        .map(|c| c.name)
+                        .unwrap_or_else(|| format!("#{conn_id}")))
+                })
+                .await;
+                match result {
+                    Ok(Ok(name)) => {
+                        let _ = ev_tx.send(Event::ConnectionDeleted { conn_id, name });
+                    }
+                    Ok(Err(message)) => {
+                        let _ = ev_tx.send(Event::StoreFailed { message });
+                    }
+                    Err(e) => {
+                        let _ = ev_tx.send(Event::StoreFailed {
+                            message: format!("delete join failed: {e}"),
                         });
                     }
                 }

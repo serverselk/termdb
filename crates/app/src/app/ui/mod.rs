@@ -22,6 +22,13 @@ pub(crate) fn primary_button<'a>(text: &'a str) -> egui::Button<'a> {
         .stroke(Stroke::new(1.0, theme::BLUE_DARK))
 }
 
+/// Muted red danger button ("Disconnect", "Delete").
+pub(crate) fn danger_button<'a>(text: &'a str) -> egui::Button<'a> {
+    egui::Button::new(RichText::new(text).color(Color32::WHITE))
+        .fill(theme::RED)
+        .stroke(Stroke::new(1.0, theme::RED_DARK))
+}
+
 /// Outline/ghost button ("MCP: Stopped" style tags, secondary actions).
 pub(crate) fn outline_button<'a>(text: &'a str) -> egui::Button<'a> {
     egui::Button::new(RichText::new(text).color(theme::TEXT_DIM))

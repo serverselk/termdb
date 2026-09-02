@@ -542,6 +542,32 @@ impl TermdbApp {
             Event::MutationFailed { message } => {
                 self.push_log(format!("edit failed: {message}"));
             }
+            Event::ConnectionDeleted { conn_id, name } => {
+                self.connections.retain(|c| c.id != Some(conn_id));
+                self.live.remove(&conn_id);
+                self.open_tables.retain(|(c, _, _), _| *c != conn_id);
+                self.favorites.retain(|(c, _, _)| *c != conn_id);
+                if self.selected_id == Some(conn_id) {
+                    self.selected_id = None;
+                }
+                if let Some((c, _, _)) = &self.table_selection {
+                    if *c == conn_id {
+                        self.table_selection = None;
+                    }
+                }
+                if let Some(query) = &self.query_state {
+                    if query.conn_id == conn_id {
+                        self.query_state = None;
+                    }
+                }
+                if let Some(panel) = &self.record_panel {
+                    if panel.key.0 == conn_id {
+                        self.record_panel = None;
+                    }
+                }
+                self.delete_arm = None;
+                self.push_log(format!("deleted connection \"{name}\""));
+            }
             Event::StoreFailed { message } => {
                 self.saving = false;
                 self.push_log(format!("error: {message}"));
@@ -591,6 +617,40 @@ impl TermdbApp {
         self.selected_id = Some(conn_id);
         self.backend.send(Request::Connect { conn_id });
         self.push_log(format!("connecting to \"{}\"…", cfg.name));
+    }
+
+    /// Disconnect the currently selected live connection.
+    fn disconnect_selected(&mut self) {
+        let Some(id) = self.selected_id else { return };
+        if self.live.contains_key(&id) {
+            self.backend.send(Request::Disconnect { conn_id: id });
+        }
+    }
+
+    /// Remove the selected connection from the config store + vault.
+    fn delete_selected_connection(&mut self) {
+        let Some(id) = self.selected_id else { return };
+        self.backend.send(Request::DeleteConnection { conn_id: id });
+        self.push_log(format!("deleting connection #{id}…"));
+    }
+
+    /// Toggle a table's favorite star.
+    fn toggle_favorite(&mut self, key: TableKey) {
+        if !self.favorites.remove(&key) {
+            self.favorites.insert(key);
+        }
+    }
+
+    /// Open a favorited (or any) table directly.
+    fn open_table(&mut self, key: TableKey) {
+        if !self.live.contains_key(&key.0) {
+            return;
+        }
+        self.table_selection = Some(key.clone());
+        if let Some(live) = self.live.get_mut(&key.0) {
+            live.selected_database = Some(key.1.clone());
+            live.selected_table = Some(key.2.clone());
+        }
     }
 
     fn run_query(&mut self) {

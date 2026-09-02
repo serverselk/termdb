@@ -3,11 +3,13 @@
 
 use egui::RichText;
 
-use super::{ghost_button, primary_button, status_dot};
+use super::{danger_button, ghost_button, primary_button, status_dot};
 use crate::app::TermdbApp;
 use crate::theme;
 use termdb::db::Request;
 use termdb_core::Engine;
+
+type TableKey = crate::app::TableKey;
 
 pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
     egui::Panel::left("sidebar")
@@ -27,6 +29,12 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
                     );
                     app.ui_connection_list(ui);
                     ui.add_space(16.0);
+                    app.ui_favorites_section(ui);
+                    if app.favorites.is_empty() {
+                        ui.add_space(16.0);
+                    } else {
+                        ui.add_space(10.0);
+                    }
                     ui.label(
                         RichText::new("DATABASES")
                             .small()
@@ -37,7 +45,7 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
                     ui.add_space(8.0);
                 });
 
-            // Bottom dock: status only.
+            // Bottom dock: status + Disconnect / Delete actions.
             ui.add_space(4.0);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(10.0);
@@ -69,6 +77,27 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
                                 });
                             }
                         }
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let half = (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
+                            if ui
+                                .add(danger_button("Disconnect").min_size(egui::vec2(half, 0.0)))
+                                .clicked()
+                            {
+                                app.disconnect_selected();
+                            }
+                            let mut delete = danger_button("Delete");
+                            delete = delete
+                                .fill(theme::CARD)
+                                .stroke(egui::Stroke::new(1.0, theme::RED_DARK));
+                            if ui
+                                .add(delete.min_size(egui::vec2(half, 0.0)))
+                                .on_hover_text("Remove this connection")
+                                .clicked()
+                            {
+                                app.delete_selected_connection();
+                            }
+                        });
                     });
             });
         });
@@ -137,6 +166,42 @@ impl TermdbApp {
         }
     }
 
+    /// Favorite (starred) tables, surfaced at the top of the sidebar.
+    fn ui_favorites_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("FAVORITES")
+                .small()
+                .strong()
+                .color(theme::TEXT_DIM),
+        );
+        if self.favorites.is_empty() {
+            ui.label(
+                RichText::new("no favourites — star a table below")
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+            return;
+        }
+        let keys: Vec<TableKey> = self.favorites.iter().cloned().collect();
+        for key in keys {
+            let (conn_id, _, _) = &key;
+            let live = self.live.contains_key(conn_id);
+            ui.horizontal(|ui| {
+                let active = self.table_selection.as_ref() == Some(&key);
+                let label = ui.selectable_label(active, format!("{}.{}", key.1, key.2));
+                if label.clicked() {
+                    self.open_table(key.clone());
+                }
+                if ui.add(ghost_button("★").small()).clicked() {
+                    self.toggle_favorite(key);
+                }
+                if !live {
+                    ui.label(RichText::new("•").small().color(theme::TEXT_DIM));
+                }
+            });
+        }
+    }
+
     /// Databases (collapsing) → tables underneath every live connection.
     fn ui_database_tree(&mut self, ui: &mut egui::Ui) {
         let live_ids: Vec<i64> = self.live.keys().copied().collect();
@@ -157,64 +222,71 @@ impl TermdbApp {
             }
             let databases = live.databases.clone();
 
-            let live = self.live.get_mut(&conn_id).expect("connection still live");
-            for db in databases {
-                let tables = live.tables.get(&db).cloned();
-                let loading = live.loading_tables.contains(&db);
+            // Defer `open_table` (a whole-self method) until the `live` borrow
+            // ends, so the tree row closures only touch disjoint fields.
+            let mut requested_opens: Vec<TableKey> = Vec::new();
+            {
+                let live = self.live.get_mut(&conn_id).expect("connection still live");
+                for db in databases {
+                    let tables = live.tables.get(&db).cloned();
+                    let loading = live.loading_tables.contains(&db);
 
-                let resp = egui::CollapsingHeader::new(RichText::new(&db).strong())
-                    .id_salt(("db", conn_id, &db))
-                    .show(ui, |ui| {
-                        if let Some(ts) = &tables {
-                            for table in ts {
-                                let key = (conn_id, db.clone(), table.clone());
-                                let active = live.selected_database.as_deref() == Some(db.as_str())
-                                    && live.selected_table.as_deref() == Some(table.as_str());
-                                let starred = self.favorites.contains(&key);
-                                ui.horizontal(|ui| {
-                                    if ui.selectable_label(active, table).clicked() {
-                                        live.selected_database = Some(db.clone());
-                                        live.selected_table = Some(table.clone());
-                                        self.table_selection = Some(key.clone());
-                                    }
-                                    ui.add_space(4.0);
-                                    if starred {
-                                        if ui
-                                            .add(ghost_button("★").small())
-                                            .on_hover_text("Unfavorite")
+                    let resp = egui::CollapsingHeader::new(RichText::new(&db).strong())
+                        .id_salt(("db", conn_id, &db))
+                        .show(ui, |ui| {
+                            if let Some(ts) = &tables {
+                                for table in ts {
+                                    let key = (conn_id, db.clone(), table.clone());
+                                    let active = live.selected_database.as_deref()
+                                        == Some(db.as_str())
+                                        && live.selected_table.as_deref() == Some(table.as_str());
+                                    let starred = self.favorites.contains(&key);
+                                    ui.horizontal(|ui| {
+                                        if ui.selectable_label(active, table).clicked() {
+                                            requested_opens.push(key.clone());
+                                        }
+                                        ui.add_space(4.0);
+                                        if starred {
+                                            if ui
+                                                .add(ghost_button("★").small())
+                                                .on_hover_text("Unfavorite")
+                                                .clicked()
+                                            {
+                                                self.favorites.remove(&key);
+                                            }
+                                        } else if ui
+                                            .add(ghost_button("☆").small())
+                                            .on_hover_text("Favorite")
                                             .clicked()
                                         {
-                                            self.favorites.remove(&key);
+                                            self.favorites.insert(key);
                                         }
-                                    } else if ui
-                                        .add(ghost_button("☆").small())
-                                        .on_hover_text("Favorite")
-                                        .clicked()
-                                    {
-                                        self.favorites.insert(key);
-                                    }
-                                });
+                                    });
+                                }
+                            } else if loading {
+                                ui.label(RichText::new("loading…").small().color(theme::TEXT_DIM));
+                            } else {
+                                ui.label(
+                                    RichText::new("click to load")
+                                        .small()
+                                        .color(theme::TEXT_DIM),
+                                );
                             }
-                        } else if loading {
-                            ui.label(RichText::new("loading…").small().color(theme::TEXT_DIM));
-                        } else {
-                            ui.label(
-                                RichText::new("click to load")
-                                    .small()
-                                    .color(theme::TEXT_DIM),
-                            );
-                        }
-                    });
+                        });
 
-                let needs_load = tables.is_none() && !loading;
-                if resp.header_response.clicked() && needs_load {
-                    live.loading_tables.insert(db.clone());
-                    live.selected_database = Some(db.clone());
-                    self.backend.send(Request::ListTables {
-                        conn_id,
-                        database: db,
-                    });
+                    let needs_load = tables.is_none() && !loading;
+                    if resp.header_response.clicked() && needs_load {
+                        live.loading_tables.insert(db.clone());
+                        live.selected_database = Some(db.clone());
+                        self.backend.send(Request::ListTables {
+                            conn_id,
+                            database: db,
+                        });
+                    }
                 }
+            }
+            for key in requested_opens {
+                self.open_table(key);
             }
         }
     }
