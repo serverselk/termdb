@@ -245,10 +245,10 @@ pub struct TermdbApp {
     query_open: bool,
     history_open: bool,
     results_open: bool,
-    log_open: bool,
     /// Overlay windows.
     show_new_connection: bool,
     show_settings: bool,
+    show_logs: bool,
     /// Previous runs, newest first.
     history: Vec<HistoryEntry>,
     /// WHERE-builder state.
@@ -299,9 +299,9 @@ impl TermdbApp {
             query_open: true,
             history_open: false,
             results_open: true,
-            log_open: true,
             show_new_connection: false,
             show_settings: false,
+            show_logs: false,
             history: Vec::new(),
             filter_col: String::new(),
             filter_op: "=".to_owned(),
@@ -951,6 +951,7 @@ impl eframe::App for TermdbApp {
 
         // Floating overlays (drawn last so they sit above everything).
         header::ui_settings_window(self, &ctx);
+        header::ui_logs_window(self, &ctx);
         sidebar::ui_new_connection_window(self, &ctx);
         self.ui_record_panel(&ctx);
     }

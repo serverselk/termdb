@@ -1,6 +1,3 @@
-//! "TUP-DB-CLIENT" slate UI theme: deep navy base, card panels, subtle grid
-//! borders, blue primary actions, muted red danger. Flat, no rounded corners.
-
 use egui::{
     style::WidgetVisuals, Color32, CornerRadius, FontId, Shadow, Stroke, TextStyle, Theme, Visuals,
 };

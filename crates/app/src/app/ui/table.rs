@@ -5,7 +5,7 @@
 use egui::{Align, Layout, RichText};
 use egui_extras::{Column as TableColumn, TableBuilder};
 
-use super::{outline_button, pill, primary_button, TABLE_GRID_HEIGHT};
+use super::{outline_button, pill, primary_button};
 use crate::app::{single_pk, RecordAction, RecordPanelMode, TermdbApp};
 use crate::theme;
 use termdb::db::engine::{Column, TableFilter, FILTER_OPS};
@@ -38,22 +38,20 @@ impl TermdbApp {
         } else {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("▾ TABLE: (no table selected)").strong());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new("demo · 96 rows")
-                            .small()
-                            .color(theme::TEXT_DIM),
-                    );
-                });
             });
             ui.separator();
+            ui.add_space(8.0);
             ui.label(
                 RichText::new("pick a table in the sidebar to browse it")
                     .small()
                     .color(theme::TEXT_DIM),
             );
-            ui.add_space(6.0);
-            demo_grid(ui);
+            ui.label(
+                RichText::new("or run an ad-hoc query in the QUERY EDITOR below")
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+            ui.add_space(8.0);
         }
     }
 
@@ -380,53 +378,4 @@ impl TermdbApp {
             }
         }
     }
-}
-
-/// Mock `global_grants`-style grid, shown when no live table is open so the
-/// workspace still matches the mockup.
-fn demo_grid(ui: &mut egui::Ui) {
-    const HEADERS: [&str; 5] = ["USER", "HOST", "PRIV", "WITH_GRANT_OPTION", "Actions"];
-    const ROWS: [(&str, &str, &str, &str); 5] = [
-        ("mysql.infoschema", "localhost", "AUDIT_ABORT_EXEMPT", "N"),
-        ("mysql.session", "localhost", "AUDIT_ABORT_EXEMPT", "N"),
-        ("mysql.sys", "localhost", "AUDIT_ABORT_EXEMPT", "N"),
-        ("root", "%", "ALL PRIVILEGES", "Y"),
-        ("admin", "192.168.%", "SELECT, INSERT, UPDATE", "N"),
-    ];
-
-    let table = TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .max_scroll_height(TABLE_GRID_HEIGHT)
-        .cell_layout(Layout::left_to_right(Align::LEFT))
-        .column(TableColumn::auto())
-        .column(TableColumn::auto())
-        .column(TableColumn::auto())
-        .column(TableColumn::auto())
-        .column(TableColumn::exact(110.0));
-
-    table
-        .header(26.0, |mut header| {
-            for name in HEADERS {
-                header.col(|ui| {
-                    ui.strong(name);
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(20.0, ROWS.len(), |mut row| {
-                let r = ROWS[row.index()];
-                for cell in [r.0, r.1, r.2, r.3] {
-                    row.col(|ui| {
-                        ui.label(cell);
-                    });
-                }
-                row.col(|ui| {
-                    ui.horizontal(|ui| {
-                        let _ = ui.small_button("Edit");
-                        let _ = ui.small_button("Del");
-                    });
-                });
-            });
-        });
 }

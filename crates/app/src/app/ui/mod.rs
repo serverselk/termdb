@@ -106,10 +106,6 @@ pub(crate) fn workspace(app: &mut TermdbApp, ui: &mut Ui) {
             card(ui, |ui| {
                 app.ui_results_card(ui);
             });
-            ui.add_space(10.0);
-            card(ui, |ui| {
-                app.ui_log_card(ui);
-            });
             ui.add_space(4.0);
         });
 }

@@ -132,32 +132,6 @@ impl TermdbApp {
             self.export_snapshot(format);
         }
     }
-
-    /// Collapsible LOG strip (errors and status surface here).
-    pub(crate) fn ui_log_card(&mut self, ui: &mut egui::Ui) {
-        let mut open = self.log_open;
-        let mut clear = false;
-        section_header(ui, &mut open, "LOG", |ui| {
-            if !self.log.is_empty() && ui.small_button("Clear").clicked() {
-                clear = true;
-            }
-        });
-        if open {
-            egui::ScrollArea::vertical()
-                .max_height(140.0)
-                .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for line in &self.log {
-                        ui.label(RichText::new(line).monospace().small());
-                    }
-                });
-        }
-        self.log_open = open;
-        if clear {
-            self.log.clear();
-        }
-    }
 }
 
 /// Read-only virtualized grid for ad-hoc query results.

@@ -113,6 +113,9 @@ pub(crate) fn ui_settings_window(app: &mut TermdbApp, ctx: &egui::Context) {
                     });
                     app.push_log("ping sent".into());
                 }
+                if ui.add(outline_button("Logs")).clicked() {
+                    app.show_logs = true;
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add(outline_button("Close")).clicked() {
                         close = true;
@@ -122,5 +125,53 @@ pub(crate) fn ui_settings_window(app: &mut TermdbApp, ctx: &egui::Context) {
         });
     if !open || close {
         app.show_settings = false;
+    }
+}
+
+/// Logs modal, opened from Settings → Logs.
+pub(crate) fn ui_logs_window(app: &mut TermdbApp, ctx: &egui::Context) {
+    if !app.show_logs {
+        return;
+    }
+    let mut open = true;
+    let mut clear = false;
+    egui::Window::new("Logs")
+        .open(&mut open)
+        .default_width(600.0)
+        .default_height(380.0)
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{} entries", app.log.len()))
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                if ui.small_button("Clear").clicked() {
+                    clear = true;
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    if app.log.is_empty() {
+                        ui.label(
+                            RichText::new("no log entries")
+                                .color(theme::TEXT_DIM)
+                                .italics(),
+                        );
+                    }
+                    for line in &app.log {
+                        ui.label(RichText::new(line).monospace().small());
+                    }
+                });
+        });
+    if clear {
+        app.log.clear();
+    }
+    if !open {
+        app.show_logs = false;
     }
 }
