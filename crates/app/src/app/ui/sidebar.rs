@@ -3,7 +3,7 @@
 
 use egui::RichText;
 
-use super::{danger_button, ghost_button, primary_button, status_dot};
+use super::{ghost_button, primary_button, status_dot};
 use crate::app::TermdbApp;
 use crate::theme;
 use termdb::db::Request;
@@ -37,7 +37,7 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
                     ui.add_space(8.0);
                 });
 
-            // Bottom dock: status + full-width red Disconnect.
+            // Bottom dock: status only.
             ui.add_space(4.0);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(10.0);
@@ -68,15 +68,6 @@ pub(crate) fn ui_sidebar(app: &mut TermdbApp, root: &mut egui::Ui) {
                                     );
                                 });
                             }
-                        }
-                        if ui
-                            .add(
-                                danger_button("Disconnect")
-                                    .min_size(egui::vec2(ui.available_width(), 0.0)),
-                            )
-                            .clicked()
-                        {
-                            app.disconnect_selected();
                         }
                     });
             });

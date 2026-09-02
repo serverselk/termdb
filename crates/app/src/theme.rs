@@ -72,6 +72,9 @@ fn widget(w: &mut WidgetVisuals, fill: Color32, border: Color32, text: Color32) 
     w.bg_stroke = Stroke::new(1.0, border);
     w.fg_stroke = Stroke::new(1.0, text);
     w.corner_radius = CornerRadius::ZERO;
+    // Hover/active states otherwise expand the widget a fraction of a pixel,
+    // reflowing neighbours and making lists feel jumpy.
+    w.expansion = 0.0;
 }
 
 fn style() -> egui::Style {

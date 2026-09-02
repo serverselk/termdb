@@ -591,14 +591,6 @@ impl TermdbApp {
         self.push_log(format!("connecting to \"{}\"…", cfg.name));
     }
 
-    /// Disconnect the currently selected live connection.
-    fn disconnect_selected(&mut self) {
-        let Some(id) = self.selected_id else { return };
-        if self.live.contains_key(&id) {
-            self.backend.send(Request::Disconnect { conn_id: id });
-        }
-    }
-
     fn run_query(&mut self) {
         let sql = self.query_text.trim().to_owned();
         if sql.is_empty() {
