@@ -8,35 +8,38 @@ use crate::theme;
 
 pub(crate) fn ui_header_bar(app: &mut TermdbApp, root: &mut egui::Ui) {
     egui::Panel::top("header")
-        .exact_size(44.0)
+        .exact_size(48.0)
         .show(root, |ui| {
-            ui.horizontal(|ui| {
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new("TERMDB")
-                        .monospace()
-                        .strong()
-                        .size(17.0)
-                        .color(theme::TEXT),
-                );
+            egui::Frame::default()
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("TERMDB")
+                                .monospace()
+                                .strong()
+                                .size(17.0)
+                                .color(theme::TEXT),
+                        );
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(primary_button("+ NEW CONNECTION")).clicked() {
-                        app.show_new_connection = true;
-                    }
-                    ui.add_space(10.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(primary_button("+ NEW CONNECTION")).clicked() {
+                                app.show_new_connection = true;
+                            }
+                            ui.add_space(10.0);
 
-                    let gear = "⚙";
-                    if ui
-                        .add(icon_button(gear))
-                        .on_hover_text("Settings")
-                        .clicked()
-                    {
-                        app.show_settings = true;
-                    }
-                    ui.add_space(4.0);
+                            let gear = "⚙";
+                            if ui
+                                .add(icon_button(gear))
+                                .on_hover_text("Settings")
+                                .clicked()
+                            {
+                                app.show_settings = true;
+                            }
+                            ui.add_space(4.0);
+                        });
+                    });
                 });
-            });
         });
 }
 
