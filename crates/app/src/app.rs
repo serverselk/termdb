@@ -242,6 +242,7 @@ pub struct TermdbApp {
     /// Query editor + section collapse states.
     query_text: String,
     query_state: Option<QueryState>,
+    table_open: bool,
     query_open: bool,
     history_open: bool,
     results_open: bool,
@@ -296,6 +297,7 @@ impl TermdbApp {
             page_size: 50,
             query_text: String::new(),
             query_state: None,
+            table_open: true,
             query_open: true,
             history_open: false,
             results_open: true,
@@ -695,93 +697,136 @@ impl TermdbApp {
         };
         let mut fields = std::mem::take(&mut panel.fields);
         let mut save = false;
-        let mut cancel = false;
-        let mut open_flag = true;
+        let mut close = false;
 
-        egui::Window::new(title)
-            .open(&mut open_flag)
-            .anchor(egui::Align2::RIGHT_CENTER, [-8.0, 0.0])
-            .default_width(420.0)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    egui::Grid::new("record_panel_fields")
-                        .num_columns(2)
-                        .spacing([12.0, 8.0])
-                        .show(ui, |ui| {
-                            for (i, col) in columns.iter().enumerate() {
-                                ui.vertical(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(&col.name);
-                                        if col.key == "PRI" {
-                                            ui.label(
-                                                RichText::new("PK")
-                                                    .small()
-                                                    .color(crate::theme::AMBER),
-                                            );
-                                        }
-                                        if auto_increment_col(col) {
-                                            ui.label(
-                                                RichText::new("AI")
-                                                    .small()
-                                                    .color(crate::theme::GREEN),
-                                            );
-                                        }
-                                        if !col.nullable {
-                                            ui.label(
-                                                RichText::new("*").small().color(crate::theme::RED),
-                                            );
-                                        }
-                                    });
-                                });
-                                let disabled = auto_increment_col(col);
-                                let Some(field) = fields.get_mut(i) else {
-                                    ui.end_row();
-                                    continue;
-                                };
-                                if is_bool_col(col) {
-                                    let mut value = field != "false" && !field.is_empty();
-                                    let resp = ui.add_enabled(
-                                        !disabled,
-                                        egui::Checkbox::without_text(&mut value),
-                                    );
-                                    if resp.changed() {
-                                        *field = value.to_string();
-                                    }
-                                } else if is_complex_col(col) {
-                                    ui.add_enabled(
-                                        !disabled,
-                                        egui::TextEdit::multiline(field).desired_rows(4),
-                                    );
-                                } else {
-                                    ui.add_enabled(
-                                        !disabled,
-                                        egui::TextEdit::singleline(field).desired_width(240.0),
-                                    );
-                                }
-                                ui.end_row();
+        let modal = egui::Modal::new(egui::Id::new("termdb_record_panel_modal")).show(ctx, |ui| {
+            egui::Frame::default()
+                .fill(crate::theme::CARD)
+                .stroke(egui::Stroke::new(1.0, crate::theme::BORDER_STRONG))
+                .corner_radius(0)
+                .inner_margin(egui::Margin::symmetric(16, 12))
+                .show(ui, |ui| {
+                    ui.set_min_width(400.0);
+                    ui.horizontal(|ui| {
+                        ui.heading(RichText::new(title).monospace());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new("×")
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::NONE),
+                                )
+                                .on_hover_text("Close")
+                                .clicked()
+                            {
+                                close = true;
                             }
                         });
-                });
-                ui.add_space(6.0);
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(ui::primary_button("Save")).clicked() {
-                            save = true;
-                        }
-                        if ui.add(ui::outline_button("Cancel")).clicked() {
-                            cancel = true;
-                        }
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(420.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            egui::Grid::new("record_panel_fields")
+                                .num_columns(2)
+                                .spacing([12.0, 8.0])
+                                .show(ui, |ui| {
+                                    for (i, col) in columns.iter().enumerate() {
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(&col.name);
+                                                if col.key == "PRI" {
+                                                    ui.label(
+                                                        RichText::new("PK")
+                                                            .small()
+                                                            .color(crate::theme::AMBER),
+                                                    );
+                                                }
+                                                if auto_increment_col(col) {
+                                                    ui.label(
+                                                        RichText::new("AI")
+                                                            .small()
+                                                            .color(crate::theme::GREEN),
+                                                    );
+                                                }
+                                                if !col.nullable {
+                                                    ui.label(
+                                                        RichText::new("*")
+                                                            .small()
+                                                            .color(crate::theme::RED),
+                                                    );
+                                                }
+                                            });
+                                        });
+                                        let disabled = auto_increment_col(col);
+                                        let Some(field) = fields.get_mut(i) else {
+                                            ui.end_row();
+                                            continue;
+                                        };
+                                        if is_bool_col(col) {
+                                            let mut value = field != "false" && !field.is_empty();
+                                            let resp = ui.add_enabled(
+                                                !disabled,
+                                                egui::Checkbox::without_text(&mut value),
+                                            );
+                                            if resp.changed() {
+                                                *field = value.to_string();
+                                            }
+                                        } else if is_complex_col(col) {
+                                            ui.add_enabled(
+                                                !disabled,
+                                                egui::TextEdit::multiline(field).desired_rows(4),
+                                            );
+                                        } else {
+                                            ui.add_enabled(
+                                                !disabled,
+                                                egui::TextEdit::singleline(field)
+                                                    .desired_width(240.0),
+                                            );
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Save").strong().color(egui::Color32::WHITE),
+                                    )
+                                    .fill(crate::theme::BLUE)
+                                    .stroke(egui::Stroke::new(1.0, crate::theme::BLUE_DARK)),
+                                )
+                                .clicked()
+                            {
+                                save = true;
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new("Cancel")
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::new(
+                                            1.0,
+                                            crate::theme::BORDER_STRONG,
+                                        )),
+                                )
+                                .clicked()
+                            {
+                                close = true;
+                            }
+                        });
                     });
                 });
-            });
+        });
 
-        if cancel {
-            open_flag = false;
+        if modal.should_close() {
+            close = true;
         }
-        if open_flag {
+        if !close {
             panel.fields = fields;
             if save {
                 self.submit_record_panel(&panel);

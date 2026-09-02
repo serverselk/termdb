@@ -12,47 +12,65 @@ use termdb::db::engine::{Column, TableFilter, FILTER_OPS};
 use termdb::db::Request;
 
 impl TermdbApp {
-    /// The active-table card. Falls back to a demo grid when no table is open.
+    /// The active-table card, collapsible like the other sections. Falls back
+    /// to a hint when no table is open.
     pub(crate) fn ui_table_card(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.table_open;
+        let mut add = false;
+
         if let Some(key) = self.table_selection.clone() {
             let (_, db, table) = &key;
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("▾ TABLE: {db}.{table}")).strong());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let ready = self
-                        .open_tables
-                        .get(&key)
-                        .map(|o| !o.columns.is_empty())
-                        .unwrap_or(false);
+            let title = format!("TABLE: {db}.{table}");
+            let loaded = self
+                .open_tables
+                .get(&key)
+                .map(|o| !o.columns.is_empty())
+                .unwrap_or(false);
+            let total = self.open_tables.get(&key).map(|o| o.total).unwrap_or(0);
+
+            super::section_header(ui, &mut open, &title, |ui| {
+                if loaded {
+                    ui.label(
+                        RichText::new(format!("{total} rows"))
+                            .small()
+                            .color(theme::TEXT_DIM),
+                    );
                     if ui
-                        .add_enabled(ready, primary_button("+ Add"))
+                        .add(primary_button("+ Add"))
                         .on_hover_text("Insert a new row")
                         .clicked()
                     {
-                        self.open_record_panel(&key, RecordPanelMode::Add, None);
+                        add = true;
                     }
-                });
+                }
             });
-            ui.separator();
-            self.ui_table_view(ui, key);
+
+            if add {
+                self.open_record_panel(&key, RecordPanelMode::Add, None);
+            }
+            if open {
+                ui.separator();
+                self.ui_table_view(ui, key);
+            }
         } else {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("▾ TABLE: (no table selected)").strong());
-            });
-            ui.separator();
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new("pick a table in the sidebar to browse it")
-                    .small()
-                    .color(theme::TEXT_DIM),
-            );
-            ui.label(
-                RichText::new("or run an ad-hoc query in the QUERY EDITOR below")
-                    .small()
-                    .color(theme::TEXT_DIM),
-            );
-            ui.add_space(8.0);
+            super::section_header(ui, &mut open, "TABLE: (no table selected)", |_| {});
+            if open {
+                ui.separator();
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("pick a table in the sidebar to browse it")
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                ui.label(
+                    RichText::new("or run an ad-hoc query in the QUERY EDITOR below")
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                ui.add_space(8.0);
+            }
         }
+        self.table_open = open;
     }
 
     /// The opened table: header toolbar, filter builder, paginated grid.
