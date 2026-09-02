@@ -19,11 +19,6 @@ pub(crate) fn ui_header_bar(app: &mut TermdbApp, root: &mut egui::Ui) {
                         .size(17.0)
                         .color(theme::TEXT),
                 );
-                ui.label(
-                    RichText::new("  •  rust/egui")
-                        .small()
-                        .color(theme::TEXT_DIM),
-                );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     pill(ui, "MCP: Stopped", theme::TEXT_DIM);

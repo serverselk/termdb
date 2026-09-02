@@ -1039,7 +1039,7 @@ impl eframe::App for TermdbApp {
             .frame(
                 egui::Frame::default()
                     .fill(crate::theme::BG)
-                    .inner_margin(egui::Margin::symmetric(10, 8)),
+                    .inner_margin(egui::Margin::symmetric(12, 12)),
             )
             .show(ui, |ui| {
                 workspace(self, ui);
