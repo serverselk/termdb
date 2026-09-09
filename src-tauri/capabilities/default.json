@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Least-privilege baseline for the termdb web UI.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

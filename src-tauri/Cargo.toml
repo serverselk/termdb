@@ -1,0 +1,25 @@
+[package]
+name = "termdb-tauri"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "termdb Tauri shell: easy-to-update web UI over the shared Rust core (side-by-side with the egui app)"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+termdb-core = { path = "../crates/core" }
+thiserror.workspace = true
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Unstable Tauri features must be opted into explicitly.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
